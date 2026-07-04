@@ -1,0 +1,29 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#2563EB"/>
+    </linearGradient>
+    <clipPath id="rounded">
+      <rect x="112" y="112" width="800" height="800" rx="180"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#rounded)">
+    <rect x="112" y="112" width="800" height="800" fill="url(#bg)"/>
+    <!-- window container -->
+    <rect x="216" y="248" width="592" height="528" rx="48" fill="#FFFFFF" opacity="0.16"/>
+    <!-- snapped left pane (solid) -->
+    <rect x="216" y="248" width="280" height="528" rx="40" fill="#FFFFFF"/>
+    <rect x="262" y="300" width="188" height="34" rx="17" fill="#2563EB" opacity="0.85"/>
+    <circle cx="282" cy="392" r="17" fill="#93C5FD"/>
+    <circle cx="342" cy="392" r="17" fill="#93C5FD"/>
+    <circle cx="402" cy="392" r="17" fill="#93C5FD"/>
+    <rect x="262" y="440" width="160" height="24" rx="12" fill="#BFDBFE"/>
+    <rect x="262" y="486" width="120" height="24" rx="12" fill="#BFDBFE"/>
+    <!-- right pane (ghosted, content lines) -->
+    <rect x="540" y="300" width="210" height="34" rx="17" fill="#FFFFFF" opacity="0.55"/>
+    <rect x="540" y="380" width="210" height="34" rx="17" fill="#FFFFFF" opacity="0.40"/>
+    <rect x="540" y="460" width="150" height="34" rx="17" fill="#FFFFFF" opacity="0.40"/>
+  </g>
+  <rect x="112" y="112" width="800" height="800" rx="180" fill="none" stroke="#1D4ED8" stroke-width="6" opacity="0.4"/>
+</svg>

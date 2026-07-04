@@ -1,0 +1,14 @@
+# Swift Package Manager build output
+.build/
+Package.resolved
+
+# Generated app bundle & installer artifacts
+WindowSnap.app/
+*.dmg
+dmg_staging/
+
+# Generated icon (produced from Icon.svg at build time)
+Icon.icns
+
+# macOS cruft
+.DS_Store
