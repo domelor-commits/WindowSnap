@@ -5,6 +5,8 @@ import Vision
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem?
     let hotkeys = HotkeyManager()
+    let dragSnap = DragSnapManager()
+    var permissionsWindow: PermissionsWindowController?
     var settingsWindow: SettingsWindowController!
     /// Periodically captures the current arrangement into Default while you work,
     /// so a good layout exists before lock/sleep hides all windows.
@@ -23,7 +25,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Ensure the Dock shows our icon even if Icon.icns wasn't bundled.
         NSApp.applicationIconImage = AppDelegate.dockIcon()
         ensureAccessibility()
-        ensureScreenRecording()
 
         // These options were removed from the UI and are now fixed: always show
         // the menu bar icon, always snap to screen edges, never add a gap or play
@@ -51,6 +52,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if Settings.shared.showInMenuBar { setupMenuBar() }
         registerHotkeys()
+
+        // Magnet-style drag-to-edge snapping: route a released drag onto the
+        // chosen region/screen through the same placement path as the shortcuts.
+        dragSnap.onSnap = { [weak self] window, region, screen in
+            self?.applySnap(region, on: screen, to: window)
+        }
+        if Settings.shared.dragToSnapEnabled { dragSnap.start() }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(dragToSnapToggled),
+            name: .windowSnapDragToSnapToggled, object: nil)
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(menuBarToggled),
@@ -84,12 +95,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self, selector: #selector(appDidBecomeActive),
             name: NSApplication.didBecomeActiveNotification, object: nil)
 
+        // Track display reconfiguration from the start, so the unlock/wake
+        // "displays have settled" checks work even if no wake restore has run
+        // yet in this session (e.g. plain lock/unlock without system sleep).
+        AppDelegate.installDisplayReconfigCallback()
+
         // Start the periodic snapshot so a recent good Default always exists
         // before lock/sleep hides the windows.
         startPeriodicSnapshot()
 
-        // Show the window on first launch so users find the UI.
-        settingsWindow.show()
+        // On launch, if either required permission is missing, guide the user
+        // through the setup wizard; otherwise open the main window as usual.
+        if PermissionsWindowController.allGranted() {
+            settingsWindow.show()
+        } else {
+            showPermissions()
+        }
+    }
+
+    /// Open (or reopen) the permissions setup wizard.
+    func showPermissions() {
+        if permissionsWindow == nil { permissionsWindow = PermissionsWindowController() }
+        permissionsWindow?.show()
+    }
+
+    @objc func dragToSnapToggled() {
+        if Settings.shared.dragToSnapEnabled { dragSnap.start() } else { dragSnap.stop() }
     }
 
     // MARK: - Periodic "Saved" snapshot
@@ -128,6 +159,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func screenDidUnlock() {
         screenIsLocked = false
         Logger.log("Screen unlocked")
+        scheduleUnlockDriftFixup()
+    }
+
+    /// Unlocking re-activates displays. A monitor that was still waking during
+    /// the wake-time restore gets re-enabled the moment the lock screen goes
+    /// away, and macOS shuffles windows onto it AGAIN — after the wake fix-up
+    /// passes have already finished (they run 5–30s after the restore, which can
+    /// all happen while still locked). So re-check for drift after unlock too,
+    /// and re-restore the Default layout if windows moved.
+    private func scheduleUnlockDriftFixup() {
+        guard Settings.shared.restoreOnWake else { return }
+        guard let layout = LayoutManager.loadDefault() else { return }
+        for delay in [2.0, 8.0, 20.0, 40.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard LayoutManager.displaySignature() == layout.displaySignature,
+                      Date().timeIntervalSince(AppDelegate.lastReconfigTime) >= 2.0,
+                      !LayoutManager.arrangementMatches(layout) else { return }
+                Logger.log("Unlock: drift detected — fix-up restore")
+                LayoutManager.restore(layout)
+            }
+        }
     }
 
     @objc func appDidBecomeActive() {
@@ -257,15 +309,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         AppDelegate.wakeDeadline = Date().addingTimeInterval(60)  // monitors can come online one by one
         AppDelegate.lastReconfigTime = Date()
 
-        // Install the display-reconfiguration callback once.
-        if !AppDelegate.displayCallbackInstalled {
-            CGDisplayRegisterReconfigurationCallback({ _, _, _ in
-                AppDelegate.lastReconfigTime = Date()
-            }, nil)
-            AppDelegate.displayCallbackInstalled = true
-        }
+        AppDelegate.installDisplayReconfigCallback()
 
         pollDisplaysForWakeRestore()
+    }
+
+    /// Installs the CoreGraphics display-reconfiguration callback (once) that
+    /// timestamps every display change; the wake and unlock paths use it to tell
+    /// when the monitor arrangement has stopped churning.
+    static func installDisplayReconfigCallback() {
+        guard !displayCallbackInstalled else { return }
+        CGDisplayRegisterReconfigurationCallback({ _, _, _ in
+            AppDelegate.lastReconfigTime = Date()
+        }, nil)
+        displayCallbackInstalled = true
     }
 
     /// Polls until the displays match the saved layout and have been stable for
@@ -319,17 +376,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Screen Recording
     /// The area selector's magnifier and the in-process pixel grabs
     /// (`CGWindowListCreateImage`) need Screen Recording permission — separate
-    /// from Accessibility. macOS forbids an app from granting itself this, so the
-    /// best we can do is make the one-time approval frictionless: on every launch
-    /// where it isn't yet granted, fire the system prompt AND open the exact
-    /// settings pane. Because the app is signed with a STABLE identity, the grant
-    /// then persists across future rebuilds — this only appears until you enable
-    /// it once.
-    func ensureScreenRecording() {
-        if #available(macOS 10.15, *), !CGPreflightScreenCaptureAccess() {
-            promptForScreenRecording(openPane: true)
-        }
-    }
+    /// from Accessibility. macOS forbids an app from granting itself this; the
+    /// setup wizard (shown at launch when a permission is missing) makes the
+    /// one-time approval easy, and this guard covers a capture attempted before
+    /// the grant is in place. Because the app is signed with a STABLE identity,
+    /// the grant persists across future rebuilds once enabled.
 
     /// Requests Screen Recording access, optionally opening the settings pane, and
     /// posts a guiding notification.
@@ -557,6 +608,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let open = NSMenuItem(title: "Open WindowSnap…", action: #selector(openSettings), keyEquivalent: ",")
         open.target = self
         menu.addItem(open)
+        let perms = NSMenuItem(title: "Permissions Setup…", action: #selector(openPermissions), keyEquivalent: "")
+        perms.target = self
+        menu.addItem(perms)
         menu.addItem(.separator())
         let quick: [(String, SnapRegion)] = [
             ("Left Half", .leftHalf), ("Right Half", .rightHalf), ("Maximize", .maximize)
@@ -631,6 +685,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func openSettings() { settingsWindow.show() }
+
+    @objc func openPermissions() { showPermissions() }
 
     @objc func menuSnap(_ sender: NSMenuItem) {
         if let raw = sender.representedObject as? String, let region = SnapRegion(rawValue: raw) {

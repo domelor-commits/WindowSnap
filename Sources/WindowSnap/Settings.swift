@@ -30,6 +30,7 @@ final class Settings {
     var gapBetweenWindows: Int = 0          // px gutter when snapping
     var snapshotIntervalSeconds: Int = 300  // periodic "Saved" capture interval (seconds)
     var snapToScreenEdges: Bool = true
+    var dragToSnapEnabled: Bool = true      // Magnet-style drag-to-edge snapping
     var playFeedbackSound: Bool = false
     var restoreLayoutMatchByTitle: Bool = true   // else match purely by order
     var overwriteOnStandby: Bool = true          // auto-overwrite Default at sleep (on by default)
@@ -128,6 +129,7 @@ final class Settings {
         var gapBetweenWindows: Int
         var snapshotIntervalSeconds: Int?    // optional for backward compatibility
         var snapToScreenEdges: Bool
+        var dragToSnapEnabled: Bool?       // optional for backward compatibility
         var playFeedbackSound: Bool
         var restoreLayoutMatchByTitle: Bool
         var overwriteOnStandby: Bool?      // optional for backward compatibility
@@ -148,6 +150,7 @@ final class Settings {
                             gapBetweenWindows: gapBetweenWindows,
                             snapshotIntervalSeconds: snapshotIntervalSeconds,
                             snapToScreenEdges: snapToScreenEdges,
+                            dragToSnapEnabled: dragToSnapEnabled,
                             playFeedbackSound: playFeedbackSound,
                             restoreLayoutMatchByTitle: restoreLayoutMatchByTitle,
                             overwriteOnStandby: overwriteOnStandby,
@@ -174,6 +177,7 @@ final class Settings {
         // Enforce a small floor so a tiny/zero interval can't spin the CPU.
         snapshotIntervalSeconds = max(5, snap.snapshotIntervalSeconds ?? 300)
         snapToScreenEdges = snap.snapToScreenEdges
+        dragToSnapEnabled = snap.dragToSnapEnabled ?? true
         playFeedbackSound = snap.playFeedbackSound
         restoreLayoutMatchByTitle = snap.restoreLayoutMatchByTitle
         overwriteOnStandby = snap.overwriteOnStandby ?? true

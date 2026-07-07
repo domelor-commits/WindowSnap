@@ -157,6 +157,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
             launch.toolTip = "Requires macOS 13 or later."
         }
         doc.addArrangedSubview(launch)
+        doc.addArrangedSubview(checkbox("Snap windows when dragged to a screen edge or corner",
+            state: s.dragToSnapEnabled, action: #selector(toggleDragToSnap(_:))))
         doc.addArrangedSubview(checkbox("When my Mac goes on standby or is locked, overwrite the Default layout with the current windows",
             state: s.overwriteOnStandby || s.overwriteOnLock, action: #selector(toggleOverwriteOnStandbyOrLock(_:))))
         doc.addArrangedSubview(checkbox("When my Mac wakes from standby, restore windows to the Default layout",
@@ -558,6 +560,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     }
     @objc private func toggleShowMagnifier(_ s: NSButton) {
         Settings.shared.overlayShowMagnifier = s.state == .on; Settings.shared.save()
+    }
+    @objc private func toggleDragToSnap(_ s: NSButton) {
+        Settings.shared.dragToSnapEnabled = s.state == .on; Settings.shared.save()
+        NotificationCenter.default.post(name: .windowSnapDragToSnapToggled, object: nil)
     }
     @objc private func toggleRestoreOnWake(_ s: NSButton) {
         Settings.shared.restoreOnWake = s.state == .on
@@ -1518,6 +1524,9 @@ extension SettingsWindowController: NSTableViewDataSource, NSTableViewDelegate {
 
 extension Notification.Name {
     static let windowSnapMenuBarToggled = Notification.Name("windowSnapMenuBarToggled")
+    /// Posted when the drag-to-edge snapping preference is toggled, so the app
+    /// delegate can start or stop the global mouse monitors.
+    static let windowSnapDragToSnapToggled = Notification.Name("windowSnapDragToSnapToggled")
     /// Posted when the saved-layouts list changes outside the UI (e.g. the
     /// periodic 'Saved' capture) so the Layouts tab can reload its table.
     static let windowSnapLayoutsChanged = Notification.Name("windowSnapLayoutsChanged")
