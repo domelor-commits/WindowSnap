@@ -31,6 +31,9 @@ final class Settings {
     var snapshotIntervalSeconds: Int = 300  // periodic "Saved" capture interval (seconds)
     var snapToScreenEdges: Bool = true
     var dragToSnapEnabled: Bool = true      // Magnet-style drag-to-edge snapping
+    var snapFlashEnabled: Bool = true       // flash the target region on keyboard snap
+    var clipboardHistoryEnabled: Bool = true
+    var clipboardAutoPaste: Bool = true     // paste the chosen clip into the frontmost app
     var playFeedbackSound: Bool = false
     var restoreLayoutMatchByTitle: Bool = true   // else match purely by order
     var overwriteOnStandby: Bool = true          // auto-overwrite Default at sleep (on by default)
@@ -82,6 +85,11 @@ final class Settings {
         SystemTask(id: "allInOne",             title: "All-in-One Capture Menu"),
         SystemTask(id: "toggleDesktopIcons",   title: "Show/Hide Desktop Icons"),
         SystemTask(id: "ocrArea",              title: "Copy Text from Screen (OCR)"),
+        SystemTask(id: "clipboardHistory",     title: "Clipboard History"),
+        SystemTask(id: "keepAwakeToggle",      title: "Keep Awake (toggle)"),
+        SystemTask(id: "forceQuit",            title: "Force Quit App…"),
+        SystemTask(id: "commandPalette",       title: "Command Palette"),
+        SystemTask(id: "shelf",                title: "Drag & Drop Shelf"),
         SystemTask(id: "lockScreen",           title: "Lock Screen"),
         SystemTask(id: "sleepDisplay",         title: "Sleep Display"),
         SystemTask(id: "missionControl",       title: "Mission Control"),
@@ -130,6 +138,9 @@ final class Settings {
         var snapshotIntervalSeconds: Int?    // optional for backward compatibility
         var snapToScreenEdges: Bool
         var dragToSnapEnabled: Bool?       // optional for backward compatibility
+        var snapFlashEnabled: Bool?
+        var clipboardHistoryEnabled: Bool?
+        var clipboardAutoPaste: Bool?
         var playFeedbackSound: Bool
         var restoreLayoutMatchByTitle: Bool
         var overwriteOnStandby: Bool?      // optional for backward compatibility
@@ -151,6 +162,9 @@ final class Settings {
                             snapshotIntervalSeconds: snapshotIntervalSeconds,
                             snapToScreenEdges: snapToScreenEdges,
                             dragToSnapEnabled: dragToSnapEnabled,
+                            snapFlashEnabled: snapFlashEnabled,
+                            clipboardHistoryEnabled: clipboardHistoryEnabled,
+                            clipboardAutoPaste: clipboardAutoPaste,
                             playFeedbackSound: playFeedbackSound,
                             restoreLayoutMatchByTitle: restoreLayoutMatchByTitle,
                             overwriteOnStandby: overwriteOnStandby,
@@ -178,6 +192,9 @@ final class Settings {
         snapshotIntervalSeconds = max(5, snap.snapshotIntervalSeconds ?? 300)
         snapToScreenEdges = snap.snapToScreenEdges
         dragToSnapEnabled = snap.dragToSnapEnabled ?? true
+        snapFlashEnabled = snap.snapFlashEnabled ?? true
+        clipboardHistoryEnabled = snap.clipboardHistoryEnabled ?? true
+        clipboardAutoPaste = snap.clipboardAutoPaste ?? true
         playFeedbackSound = snap.playFeedbackSound
         restoreLayoutMatchByTitle = snap.restoreLayoutMatchByTitle
         overwriteOnStandby = snap.overwriteOnStandby ?? true

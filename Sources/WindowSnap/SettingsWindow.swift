@@ -30,6 +30,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     /// so global hotkeys can be re-registered.
     var onLayoutShortcutsChanged: (() -> Void)?
 
+    /// Supplied by the app delegate so the Command Palette tab can list and run
+    /// every action (and restore focus to the previously-active app for snaps).
+    var paletteActionsProvider: (() -> [PaletteAction])?
+    var runPaletteAction: ((PaletteAction) -> Void)?
+
+    // In-window feature tabs (mirror the shared data behind the floating panels).
+    private var clipboardPane: ClipboardHistoryPane?
+    private var forceQuitPane: ForceQuitPane?
+    private var commandPane: CommandPalettePane?
+
     convenience init() {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 780, height: 860),
@@ -77,6 +87,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         resizeToFitContent()
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+        syncTabActivity()   // (re)start the Force Quit poll if that tab is showing
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        forceQuitPane?.stop()   // don't keep sampling CPU while the window is closed
     }
 
     /// Size the window so the entire Settings tab content is visible without
@@ -159,6 +174,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         doc.addArrangedSubview(launch)
         doc.addArrangedSubview(checkbox("Snap windows when dragged to a screen edge or corner",
             state: s.dragToSnapEnabled, action: #selector(toggleDragToSnap(_:))))
+        doc.addArrangedSubview(checkbox("Flash the target area when snapping with the keyboard",
+            state: s.snapFlashEnabled, action: #selector(toggleSnapFlash(_:))))
+        doc.addArrangedSubview(checkbox("Keep a clipboard history",
+            state: s.clipboardHistoryEnabled, action: #selector(toggleClipboardHistory(_:))))
+        doc.addArrangedSubview(checkbox("Paste the chosen clip into the frontmost app automatically",
+            state: s.clipboardAutoPaste, action: #selector(toggleClipboardAutoPaste(_:))))
         doc.addArrangedSubview(checkbox("When my Mac goes on standby or is locked, overwrite the Default layout with the current windows",
             state: s.overwriteOnStandby || s.overwriteOnLock, action: #selector(toggleOverwriteOnStandbyOrLock(_:))))
         doc.addArrangedSubview(checkbox("When my Mac wakes from standby, restore windows to the Default layout",
@@ -378,7 +399,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         tv.addTabViewItem(makeLayoutsTab())      // 0
         tv.addTabViewItem(makeAnnotateTab())     // 1
         tv.addTabViewItem(makeShortcutsTab())    // 2
-        tv.addTabViewItem(makeSettingsTab())     // 3
+        tv.addTabViewItem(makeClipboardTab())    // 3
+        tv.addTabViewItem(makeForceQuitTab())    // 4
+        tv.addTabViewItem(makeCommandTab())      // 5
+        tv.addTabViewItem(makeShelfTab())        // 6
+        tv.addTabViewItem(makeSettingsTab())     // 7
         tv.delegate = self
         self.tabView = tv
 
@@ -386,6 +411,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
             ("Layouts", "macwindow"),
             ("Annotate", "pencil.tip.crop.circle"),
             ("Shortcuts", "command"),
+            ("Clipboard", "doc.on.clipboard"),
+            ("Force Quit", "xmark.octagon"),
+            ("Palette", "magnifyingglass"),
+            ("Shelf", "tray.and.arrow.down"),
             ("Settings", "gearshape"),
         ]
         let header = NSStackView()
@@ -487,7 +516,61 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         annotatorPane?.loadImage(image, path: nil)
     }
 
-    func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {}
+    // MARK: - Tabs: Clipboard / Force Quit / Command Palette / Shelf
+
+    private func makeClipboardTab() -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: "clipboard")
+        item.label = "Clipboard"
+        let pane = ClipboardHistoryPane(frame: .zero)
+        pane.autoresizingMask = [.width, .height]
+        clipboardPane = pane
+        item.view = pane
+        return item
+    }
+
+    private func makeForceQuitTab() -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: "forcequit")
+        item.label = "Force Quit"
+        let pane = ForceQuitPane(frame: .zero)
+        pane.autoresizingMask = [.width, .height]
+        forceQuitPane = pane
+        item.view = pane
+        return item
+    }
+
+    private func makeCommandTab() -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: "command")
+        item.label = "Palette"
+        let pane = CommandPalettePane(frame: .zero)
+        pane.autoresizingMask = [.width, .height]
+        pane.actionsProvider = { [weak self] in self?.paletteActionsProvider?() ?? [] }
+        pane.runAction = { [weak self] in self?.runPaletteAction?($0) }
+        commandPane = pane
+        item.view = pane
+        return item
+    }
+
+    private func makeShelfTab() -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: "shelf")
+        item.label = "Shelf"
+        let view = ShelfDropView(frame: .zero)
+        view.autoresizingMask = [.width, .height]
+        item.view = view
+        return item
+    }
+
+    /// Start/stop per-tab live activity: the Force Quit poll runs only while its
+    /// tab is showing; the clipboard/command lists refresh when revealed.
+    private func syncTabActivity() {
+        let sel = tabView?.selectedTabViewItem?.identifier as? String
+        if sel == "forcequit" { forceQuitPane?.start() } else { forceQuitPane?.stop() }
+        if sel == "clipboard" { clipboardPane?.reload() }
+        if sel == "command" { commandPane?.reload() }
+    }
+
+    func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        syncTabActivity()
+    }
 
     private var gapField: NSTextField?
     private var snapshotIntervalField: NSTextField?
@@ -564,6 +647,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     @objc private func toggleDragToSnap(_ s: NSButton) {
         Settings.shared.dragToSnapEnabled = s.state == .on; Settings.shared.save()
         NotificationCenter.default.post(name: .windowSnapDragToSnapToggled, object: nil)
+    }
+    @objc private func toggleSnapFlash(_ s: NSButton) {
+        Settings.shared.snapFlashEnabled = s.state == .on; Settings.shared.save()
+    }
+    @objc private func toggleClipboardHistory(_ s: NSButton) {
+        let on = s.state == .on
+        Settings.shared.clipboardHistoryEnabled = on; Settings.shared.save()
+        if on { ClipboardHistory.shared.start() } else { ClipboardHistory.shared.stop() }
+    }
+    @objc private func toggleClipboardAutoPaste(_ s: NSButton) {
+        Settings.shared.clipboardAutoPaste = s.state == .on; Settings.shared.save()
     }
     @objc private func toggleRestoreOnWake(_ s: NSButton) {
         Settings.shared.restoreOnWake = s.state == .on
@@ -1527,6 +1621,12 @@ extension Notification.Name {
     /// Posted when the drag-to-edge snapping preference is toggled, so the app
     /// delegate can start or stop the global mouse monitors.
     static let windowSnapDragToSnapToggled = Notification.Name("windowSnapDragToSnapToggled")
+    /// Posted when the Keep Awake state changes (menu can refresh its checkmarks).
+    static let windowSnapKeepAwakeChanged = Notification.Name("windowSnapKeepAwakeChanged")
+    /// Posted when the clipboard history changes (open picker can refresh live).
+    static let windowSnapClipboardChanged = Notification.Name("windowSnapClipboardChanged")
+    /// Posted when the shelf contents change (all shelf views refresh).
+    static let windowSnapShelfChanged = Notification.Name("windowSnapShelfChanged")
     /// Posted when the saved-layouts list changes outside the UI (e.g. the
     /// periodic 'Saved' capture) so the Layouts tab can reload its table.
     static let windowSnapLayoutsChanged = Notification.Name("windowSnapLayoutsChanged")

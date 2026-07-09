@@ -8,6 +8,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let dragSnap = DragSnapManager()
     var permissionsWindow: PermissionsWindowController?
     var settingsWindow: SettingsWindowController!
+    /// The most recent non-WindowSnap app to be frontmost, so the Command Palette
+    /// tab can hand focus back before running a window action (e.g. a snap).
+    private(set) var lastActiveOtherApp: NSRunningApplication?
     /// Periodically captures the current arrangement into Default while you work,
     /// so a good layout exists before lock/sleep hides all windows.
     private var periodicSnapshotTimer: Timer?
@@ -24,6 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Ensure the Dock shows our icon even if Icon.icns wasn't bundled.
         NSApp.applicationIconImage = AppDelegate.dockIcon()
+        setupMainMenu()
+        Notifier.shared.setup()
         ensureAccessibility()
 
         // These options were removed from the UI and are now fixed: always show
@@ -50,6 +55,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.registerHotkeys()
             self?.refreshMenuBar()
         }
+        settingsWindow.paletteActionsProvider = { [weak self] in self?.buildPaletteActions() ?? [] }
+        settingsWindow.runPaletteAction = { [weak self] in self?.runPaletteActionRestoringFocus($0) }
         if Settings.shared.showInMenuBar { setupMenuBar() }
         registerHotkeys()
 
@@ -62,6 +69,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(dragToSnapToggled),
             name: .windowSnapDragToSnapToggled, object: nil)
+
+        // Clipboard history monitor (menu-bar "caffeine" Keep Awake is off until
+        // the user turns it on, so nothing to start there).
+        if Settings.shared.clipboardHistoryEnabled { ClipboardHistory.shared.start() }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(keepAwakeChanged),
+            name: .windowSnapKeepAwakeChanged, object: nil)
+
+        // Track the last non-self app to be frontmost (for palette focus hand-off).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(otherAppActivated(_:)),
+            name: NSWorkspace.didActivateApplicationNotification, object: nil)
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(menuBarToggled),
@@ -442,6 +461,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if gap > 0 { target = target.insetBy(dx: gap / 2, dy: gap / 2) }
         WindowController.setFrame(WindowController.axFrame(localTopLeft: target, on: screen), for: window)
         if Settings.shared.playFeedbackSound { NSSound.beep() }
+        if Settings.shared.snapFlashEnabled { SnapHUD.shared.flash(region: region, on: screen) }
     }
 
     // MARK: Edge detection (AX frame is top-left origin; convert to global)
@@ -585,6 +605,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return img
     }
 
+    // MARK: Main menu (standard macOS app menu bar)
+    /// Builds the top-of-screen menu bar shown when a WindowSnap window is
+    /// focused. Without this, a `.regular` app has no Edit menu — so no
+    /// Cut/Copy/Paste/Undo/Select-All in the annotator or text fields — and no
+    /// standard About / Settings / Hide / Quit shortcuts.
+    func setupMainMenu() {
+        let appName = "WindowSnap"
+        let mainMenu = NSMenu()
+
+        // App menu
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu()
+        appItem.submenu = appMenu
+        appMenu.addItem(withTitle: "About \(appName)",
+                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settings.target = self
+        let perms = appMenu.addItem(withTitle: "Permissions Setup…", action: #selector(openPermissions), keyEquivalent: "")
+        perms.target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide \(appName)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(withTitle: "Hide Others",
+                                         action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit \(appName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        // Edit menu — enables standard text editing in fields and the annotator.
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        editItem.submenu = editMenu
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: Selector(("cut:")), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: Selector(("copy:")), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: Selector(("paste:")), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: Selector(("selectAll:")), keyEquivalent: "a")
+
+        // Window menu
+        let windowItem = NSMenuItem()
+        mainMenu.addItem(windowItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowItem.submenu = windowMenu
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = windowMenu
+    }
+
     // MARK: Menu bar
     func setupMenuBar() {
         guard statusItem == nil else { return }
@@ -598,6 +678,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self          // rebuild on open so 'Saved' entries are current
         buildMenu(into: menu)
         statusItem?.menu = menu
+        updateKeepAwakeStatusDisplay()   // restore countdown/badge if already active
+    }
+
+    // MARK: Keep Awake menu-bar countdown
+
+    private var keepAwakeDisplayTimer: Timer?
+
+    /// Start/stop the once-a-second title refresh when Keep Awake turns on/off.
+    @objc func keepAwakeChanged() {
+        updateKeepAwakeStatusDisplay()
+        let timed = KeepAwake.shared.isActive && KeepAwake.shared.expiry != nil
+        if timed, keepAwakeDisplayTimer == nil {
+            let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+                self?.updateKeepAwakeStatusDisplay()
+            }
+            RunLoop.main.add(t, forMode: .common)
+            keepAwakeDisplayTimer = t
+        } else if !timed {
+            keepAwakeDisplayTimer?.invalidate(); keepAwakeDisplayTimer = nil
+        }
+    }
+
+    /// Show a live countdown (timed) or an ∞ badge (indefinite) beside the menu
+    /// bar icon while Keep Awake is on; icon only when off.
+    func updateKeepAwakeStatusDisplay() {
+        guard let button = statusItem?.button else { return }
+        let ka = KeepAwake.shared
+        if ka.isActive, let e = ka.expiry {
+            let secs = max(0, Int(e.timeIntervalSinceNow))
+            button.title = " " + AppDelegate.compactCountdown(secs)
+            button.imagePosition = .imageLeading
+            if secs == 0 { keepAwakeDisplayTimer?.invalidate(); keepAwakeDisplayTimer = nil }
+        } else if ka.isActive {
+            button.title = " ∞"
+            button.imagePosition = .imageLeading
+        } else {
+            button.title = ""
+            button.imagePosition = .imageOnly
+        }
+    }
+
+    /// Compact "M:SS" (under an hour) or "H:MM:SS" countdown.
+    static func compactCountdown(_ secs: Int) -> String {
+        let s = max(0, secs)
+        let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
     }
 
     /// Populate (or repopulate) the status-bar menu. Called when the menu is
@@ -629,6 +755,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let ocrItem = NSMenuItem(title: ocrTitle, action: #selector(ocrScreenRegion), keyEquivalent: "")
         ocrItem.target = self
         menu.addItem(ocrItem)
+
+        // Clipboard history picker.
+        let clipItem = NSMenuItem(title: "Clipboard History…", action: #selector(openClipboardHistory), keyEquivalent: "")
+        clipItem.target = self
+        menu.addItem(clipItem)
+
+        // Force Quit / activity monitor.
+        let fqItem = NSMenuItem(title: "Force Quit App…", action: #selector(openForceQuit), keyEquivalent: "")
+        fqItem.target = self
+        menu.addItem(fqItem)
+
+        // Command palette + drag-and-drop shelf.
+        let cpItem = NSMenuItem(title: "Command Palette…", action: #selector(openCommandPalette), keyEquivalent: "")
+        cpItem.target = self
+        menu.addItem(cpItem)
+        let shelfItem = NSMenuItem(title: "Drag & Drop Shelf", action: #selector(toggleShelf), keyEquivalent: "")
+        shelfItem.target = self
+        menu.addItem(shelfItem)
+
+        // Keep Awake ("caffeine") submenu: off / indefinite / timed.
+        let ka = KeepAwake.shared
+        let kaParent = NSMenuItem(title: ka.isActive ? "Keep Awake — \(ka.statusDescription)" : "Keep Awake",
+                                  action: nil, keyEquivalent: "")
+        let kaSub = NSMenu()
+        for (label, tag) in [("Off", "off"), ("Indefinitely", "inf"),
+                             ("For 30 Minutes", "30"), ("For 1 Hour", "60"), ("For 2 Hours", "120")] {
+            let it = NSMenuItem(title: label, action: #selector(keepAwakeSelected(_:)), keyEquivalent: "")
+            it.representedObject = tag; it.target = self
+            if (!ka.isActive && tag == "off") || (ka.isActive && ka.expiry == nil && tag == "inf") { it.state = .on }
+            kaSub.addItem(it)
+        }
+        kaParent.submenu = kaSub
+        menu.addItem(kaParent)
+
         menu.addItem(.separator())
 
         func titleWithShortcut(_ name: String, key: String) -> String {
@@ -687,6 +847,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func openSettings() { settingsWindow.show() }
 
     @objc func openPermissions() { showPermissions() }
+
+    @objc func openClipboardHistory() { ClipboardHistoryPanel.shared.show() }
+
+    @objc func openForceQuit() { ForceQuitPanel.shared.show() }
+
+    @objc func toggleShelf() { ShelfController.shared.toggle() }
+
+    @objc func openCommandPalette() { CommandPalette.shared.show(actions: buildPaletteActions()) }
+
+    @objc func otherAppActivated(_ note: Notification) {
+        guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+        if app.processIdentifier != ProcessInfo.processInfo.processIdentifier { lastActiveOtherApp = app }
+    }
+
+    /// Runs a palette action from the in-window tab, first handing focus back to
+    /// the previously-active app so window actions (snaps) target it.
+    func runPaletteActionRestoringFocus(_ action: PaletteAction) {
+        lastActiveOtherApp?.activate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { action.run() }
+    }
+
+    /// Assembles every runnable command for the palette. Built fresh each open so
+    /// the current saved layouts and launcher assignments are included.
+    func buildPaletteActions() -> [PaletteAction] {
+        var a: [PaletteAction] = []
+
+        let snaps: [(String, SnapRegion)] = [
+            ("Left Half", .leftHalf), ("Right Half", .rightHalf), ("Top Half", .topHalf),
+            ("Bottom Half", .bottomHalf), ("Top Left", .topLeft), ("Top Right", .topRight),
+            ("Bottom Left", .bottomLeft), ("Bottom Right", .bottomRight), ("Left Third", .leftThird),
+            ("Center Third", .centerThird), ("Right Third", .rightThird), ("Maximize", .maximize),
+            ("Center", .center),
+        ]
+        for (label, region) in snaps {
+            a.append(PaletteAction(title: "Snap: \(label)", subtitle: "Window") { [weak self] in self?.snap(region) })
+        }
+
+        a.append(PaletteAction(title: "Restore Default Layout", subtitle: "Layout") { [weak self] in
+            self?.restorePinned(LayoutManager.defaultLayoutID) })
+        a.append(PaletteAction(title: "Restore Presentation Layout", subtitle: "Layout") { [weak self] in
+            self?.restorePinned(LayoutManager.presentationLayoutID) })
+        for layout in LayoutManager.loadAll() {
+            let id = layout.id
+            a.append(PaletteAction(title: "Restore Layout: \(layout.name)", subtitle: "Layout") { [weak self] in
+                self?.performRestore(layoutID: id) })
+        }
+        a.append(PaletteAction(title: "Overwrite Default Layout", subtitle: "Layout") { [weak self] in
+            self?.overwriteLayoutViaShortcut(id: LayoutManager.defaultLayoutID) })
+        a.append(PaletteAction(title: "Overwrite Presentation Layout", subtitle: "Layout") { [weak self] in
+            self?.overwriteLayoutViaShortcut(id: LayoutManager.presentationLayoutID) })
+
+        for task in Settings.systemTasks {
+            let id = task.id
+            a.append(PaletteAction(title: task.title, subtitle: "Action") { [weak self] in self?.runSystemTask(id) })
+        }
+
+        for slot in Settings.launcherSlots {
+            guard let assignment = Settings.shared.functionKeyApps[slot], !assignment.isEmpty else { continue }
+            let title = Settings.functionKeyAssignmentTitle(assignment)
+            a.append(PaletteAction(title: "Launch: \(title)", subtitle: "Launcher") { [weak self] in
+                self?.performFunctionKeyAction(assignment) })
+        }
+
+        a.append(PaletteAction(title: "Open WindowSnap Settings", subtitle: "App") { [weak self] in self?.settingsWindow.show() })
+        a.append(PaletteAction(title: "Permissions Setup", subtitle: "App") { [weak self] in self?.showPermissions() })
+        return a
+    }
+
+    @objc func keepAwakeSelected(_ sender: NSMenuItem) {
+        guard let tag = sender.representedObject as? String else { return }
+        switch tag {
+        case "off": KeepAwake.shared.deactivate()
+        case "inf": KeepAwake.shared.activate(duration: nil)
+        default:    if let m = Int(tag) { KeepAwake.shared.activate(duration: TimeInterval(m * 60)) }
+        }
+    }
 
     @objc func menuSnap(_ sender: NSMenuItem) {
         if let raw = sender.representedObject as? String, let region = SnapRegion(rawValue: raw) {
@@ -885,6 +1121,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             toggleDesktopIcons()
         case "ocrArea":
             ocrScreenRegion()
+        case "clipboardHistory":
+            ClipboardHistoryPanel.shared.show()
+        case "keepAwakeToggle":
+            KeepAwake.shared.toggle()
+        case "forceQuit":
+            ForceQuitPanel.shared.show()
+        case "commandPalette":
+            openCommandPalette()
+        case "shelf":
+            ShelfController.shared.toggle()
         case "lockScreen":
             runProcess("/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession",
                        ["-suspend"])

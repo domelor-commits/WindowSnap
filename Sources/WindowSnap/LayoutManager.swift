@@ -437,9 +437,6 @@ enum LayoutManager {
     }
 
     static func notify(_ title: String, _ body: String) {
-        let n = NSUserNotification()
-        n.title = title
-        n.informativeText = body
-        NSUserNotificationCenter.default.deliver(n)
+        Notifier.shared.post(title: title, body: body)
     }
 }
