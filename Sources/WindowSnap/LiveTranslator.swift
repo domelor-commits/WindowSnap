@@ -159,13 +159,17 @@ final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
     private var targetLocale = Locale(identifier: "en")
     private var currentLangCode = "en"
     private var lastPartialTranslate = Date.distantPast
-    private var committedSource = ""       // this utterance's text already locked on screen
+    private var committedUpToTime: TimeInterval = 0   // audio time already flushed (per task)
+    private var lineBuffer = ""        // display-final text awaiting a sentence boundary
+    private var lastTranscription: SFTranscription?   // kept so task-end can flush the tail
+    private let holdback: TimeInterval = 1.5          // audio older than this is display-final
+    // 1.5s is the tested-clean margin: the recognizer keeps revising recent text
+    // for roughly a second, and committing sooner (0.7s) let those revisions
+    // rewrite already-written lines. Latency is instead cut via short lines.
     private var lastCommittedSentence = "" // duplicate guard for commits
     private var commitSeq = 0              // sequence number assigned to each finalized line
     private var nextEmit = 0               // next sequence to hand to the UI (keeps order)
     private var pendingCommits: [Int: (String, String)] = [:]
-    private var stableCandidate: String?   // sentence block waiting to prove stable
-    private var stableSince = Date()
     private var taskGeneration = 0         // invalidates callbacks from cancelled tasks
     private(set) var isRunning = false
 
@@ -203,7 +207,7 @@ final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
         recognizer = rec
         isRunning = true
         commitSeq = 0; nextEmit = 0; pendingCommits.removeAll()
-        stableCandidate = nil
+        committedUpToTime = 0; lineBuffer = ""; lastTranscription = nil
         startRecognitionTask()
         if case .microphone = audioSource {
             startMicrophone()
@@ -258,12 +262,15 @@ final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
         let gen = taskGeneration
         task = recognizer?.recognitionTask(with: req) { [weak self] result, error in
             guard let self = self, gen == self.taskGeneration else { return }
-            if let result = result {
-                self.handleResult(result.bestTranscription.formattedString, isFinal: result.isFinal)
+            if let result = result { self.handleResult(result) }
+            // A finished/errored task is dead. Flush EVERYTHING still pending
+            // before restarting — continuous audio rarely pauses, so most tasks
+            // end in an error, and discarding the pending text here was the main
+            // source of vanished lines and "overwritten" recordings.
+            if error != nil {
+                self.flushPending(self.lastTranscription)
+                self.restartRecognition(afterPause: false)
             }
-            // A finished/errored task is dead; restart to keep listening. `isFinal`
-            // fires on a natural pause, which is also where we want a new line.
-            if error != nil { self.restartRecognition(afterPause: false) }
         }
     }
 
@@ -272,71 +279,107 @@ final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
     /// recognizer, so a sentence is only committed once it has been stable for a
     /// moment — committing eagerly baked in text the recognizer later rewrote
     /// (seen as overwritten lines) or mis-sliced it (dropped words).
-    private func handleResult(_ full: String, isFinal: Bool) {
-        let pending = pendingText(in: full)
+    /// Commits by AUDIO TIME instead of string matching. Every partial result
+    /// carries segments with timestamps plus their exact character ranges in the
+    /// CURRENT (revised) transcript, so slicing by range stays aligned no matter
+    /// how the recognizer rewrites earlier text — the failure mode behind every
+    /// previous round of duplicated ("overwritten") and skipped words. Audio
+    /// older than `holdback` behind the newest audio is display-final: it flows
+    /// into the sentence buffer and commits at sentence boundaries.
+    private func handleResult(_ result: SFSpeechRecognitionResult) {
+        let transcription = result.bestTranscription
+        lastTranscription = transcription
 
-        // A pause finalizes the utterance: commit everything still pending —
-        // this text is final, no stability wait needed — and restart fresh so
-        // the next words (often a new speaker) begin a new line.
-        if isFinal {
-            let (sentences, remainder) = Self.splitSentences(pending)
-            for sent in sentences { commitIfFresh(sent) }
-            commitIfFresh(remainder)
-            DispatchQueue.main.async { self.onLiveSource?(""); self.onLiveTranslation?("") }
+        // A pause finalizes the utterance: flush it all and restart fresh so the
+        // next words (often a new speaker) begin a new line.
+        if result.isFinal {
+            flushPending(transcription)
             restartRecognition(afterPause: true)
             return
         }
 
-        // Live line always shows ALL not-yet-committed text, so nothing spoken
-        // is ever invisible while it waits to stabilize.
-        DispatchQueue.main.async { self.onLiveSource?(pending.trimmingCharacters(in: .whitespacesAndNewlines)) }
-        throttledLiveTranslate(pending)
+        let text = transcription.formattedString as NSString
+        let segments = transcription.segments
+        guard let newest = segments.last else { return }
+        let cutoff = newest.timestamp + newest.duration - holdback
 
-        // Candidate block = leading complete sentences (or a long run-on chunk).
-        let (sentences, remainder) = Self.splitSentences(pending)
-        var block = sentences.joined()
-        if block.isEmpty && remainder.count > 80 { block = remainder }
-        guard !block.isEmpty else { stableCandidate = nil; return }
-
-        if block == stableCandidate {
-            // Unchanged across updates for 1s → safe to lock in permanently.
-            guard Date().timeIntervalSince(stableSince) >= 1.0 else { return }
-            stableCandidate = nil
-            committedSource += block
-            let (blockSentences, blockRest) = Self.splitSentences(block)
-            for sent in blockSentences { commitIfFresh(sent) }
-            commitIfFresh(blockRest)   // run-on chunk case
-            let rest = String(pending.dropFirst(block.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-            DispatchQueue.main.async { self.onLiveSource?(rest); self.onLiveTranslation?("") }
-        } else {
-            stableCandidate = block
-            stableSince = Date()
+        var firstUncommittedStart = -1
+        var stableEnd = -1
+        var stableEndTime = committedUpToTime
+        for s in segments {
+            let end = s.timestamp + s.duration
+            if end <= committedUpToTime { continue }              // already flushed
+            if firstUncommittedStart < 0 { firstUncommittedStart = s.substringRange.location }
+            if end <= cutoff {
+                stableEnd = s.substringRange.location + s.substringRange.length
+                stableEndTime = end
+            }
         }
+        guard firstUncommittedStart >= 0 else { return }
+
+        if stableEnd > firstUncommittedStart {
+            let stable = text.substring(with: NSRange(location: firstUncommittedStart,
+                                                      length: stableEnd - firstUncommittedStart))
+            committedUpToTime = stableEndTime
+            absorbStable(stable)
+        }
+
+        // Live line = buffered mid-sentence text + the still-revisable tail.
+        let liveFrom = max(stableEnd, firstUncommittedStart)
+        let liveTail = liveFrom < text.length ? text.substring(from: liveFrom) : ""
+        let live = (lineBuffer + liveTail).trimmingCharacters(in: .whitespacesAndNewlines)
+        DispatchQueue.main.async { self.onLiveSource?(live) }
+        throttledLiveTranslate(live)
     }
 
-    /// Aligns the recognizer's latest transcript against the text already locked
-    /// on screen. The recognizer REVISES its transcript retroactively, so a fixed
-    /// character offset drifts: a leftward shift re-included committed text
-    /// (duplicated/"overwritten" lines) and a rightward shift skipped fresh words
-    /// (missing speech). Re-anchoring on the last committed characters tolerates
-    /// those revisions.
-    private func pendingText(in full: String) -> String {
-        guard !committedSource.isEmpty else { return full }
-        // Fast path: transcript still extends exactly what we committed.
-        if full.hasPrefix(committedSource) {
-            return String(full.dropFirst(committedSource.count))
+    /// Display-final text: accumulate and write it out in steady, fixed-length
+    /// lines. No punctuation is involved — the transcript just keeps flowing to
+    /// new source/translation lines as the audio stabilizes.
+    private func absorbStable(_ s: String) {
+        lineBuffer += s
+        while let line = takeLine() { commitIfFresh(line) }
+    }
+
+    /// Pulls one line's worth off the front of the buffer once it's long enough,
+    /// breaking on a space when the script uses them so words aren't split.
+    private func takeLine() -> String? {
+        // Short lines so text appears within a second or two of being spoken
+        // rather than accumulating into 5-second lumps.
+        let target = lineBuffer.contains(" ") ? 28 : 11   // latin vs CJK line length
+        let chars = Array(lineBuffer)
+        guard chars.count >= target else { return nil }
+
+        var cut = min(target, chars.count)
+        var i = min(chars.count, target + 8) - 1
+        while i >= max(0, target - 8) {
+            if chars[i] == " " { cut = i + 1; break }
+            i -= 1
         }
-        // Revision changed earlier text. Anchor on the tail of what we committed;
-        // everything after its last occurrence is genuinely new.
-        let anchor = String(committedSource.suffix(20))
-        if !anchor.isEmpty, let r = full.range(of: anchor, options: .backwards) {
-            return String(full[r.upperBound...])
+        cut = min(cut, chars.count)
+        let line = String(chars[0..<cut]).trimmingCharacters(in: .whitespaces)
+        lineBuffer = String(chars[cut...])
+        return line.isEmpty ? nil : line
+    }
+
+    /// Writes out EVERYTHING not yet committed — called on a pause (isFinal), on
+    /// task errors, and on Stop, so pending text is never discarded again.
+    private func flushPending(_ transcription: SFTranscription?) {
+        if let t = transcription {
+            let text = t.formattedString as NSString
+            var start = -1
+            for s in t.segments where s.timestamp + s.duration > committedUpToTime {
+                start = s.substringRange.location
+                break
+            }
+            if start >= 0, start < text.length { lineBuffer += text.substring(from: start) }
         }
-        // Anchor itself was revised away — length split so new words aren't lost.
-        if full.count > committedSource.count {
-            return String(full.suffix(full.count - committedSource.count))
-        }
-        return ""
+        lastTranscription = nil
+        committedUpToTime = .greatestFiniteMagnitude   // nothing further from this task
+        while let line = takeLine() { commitIfFresh(line) }
+        let rest = lineBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !rest.isEmpty { commitIfFresh(rest) }
+        lineBuffer = ""
+        DispatchQueue.main.async { self.onLiveSource?(""); self.onLiveTranslation?("") }
     }
 
     /// Commits one line unless it's an exact repeat of the previous commit —
@@ -365,7 +408,7 @@ final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
         // Anti-stall: one line whose translation never returns must not freeze
         // the whole ordered transcript behind it. After 8s, emit it with the
         // source text so the book keeps flowing.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             guard let self = self, seq >= self.nextEmit, self.pendingCommits[seq] == nil else { return }
             self.pendingCommits[seq] = (src, src)
             self.emitReady()
@@ -389,36 +432,20 @@ final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
         let t = src.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty, Date().timeIntervalSince(lastPartialTranslate) > 0.5 else { return }
         lastPartialTranslate = Date()
-        let markerCommitted = committedSource.count
+        // Drop the result if any commit or restart happened meanwhile —
+        // otherwise a slow partial translation resurrects after a flush and
+        // renders as a translation-only "ghost" block with no source line.
+        let markerSeq = commitSeq
         let markerGen = taskGeneration
         translator.translate(t) { tr in
             DispatchQueue.main.async {
-                guard markerCommitted == self.committedSource.count,
+                guard markerSeq == self.commitSeq,
                       markerGen == self.taskGeneration else { return }
                 self.onLiveTranslation?(tr)
             }
         }
     }
 
-    /// Splits into complete sentences (kept with punctuation) + trailing
-    /// remainder. Hard enders always close a sentence; commas and other clause
-    /// marks close one only once it's at least `softMinLen` characters long —
-    /// continuous Mandarin speech is punctuated almost entirely with commas, so
-    /// without the soft rule the text never reaches a boundary and nothing ever
-    /// commits to the transcript.
-    static func splitSentences(_ s: String, softMinLen: Int = 20) -> ([String], String) {
-        let hard: Set<Character> = [".", "!", "?", "。", "！", "？", "…", "\n"]
-        let soft: Set<Character> = [",", "，", "、", ";", "；", ":", "："]
-        var sentences: [String] = []
-        var current = ""
-        for ch in s {
-            current.append(ch)
-            if hard.contains(ch) || (soft.contains(ch) && current.count >= softMinLen) {
-                sentences.append(current); current = ""
-            }
-        }
-        return (sentences, current)
-    }
 
     private func maybeDetectAndSwitch(_ text: String) {
         guard autoDetect, text.count > 8 else { return }
@@ -447,8 +474,9 @@ final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
     private func restartRecognition(afterPause: Bool) {
         taskGeneration += 1   // anything the old task still delivers is stale
         task?.cancel(); task = nil; request = nil
-        committedSource = ""  // a fresh task starts a fresh cumulative transcript
-        stableCandidate = nil
+        committedUpToTime = 0   // a fresh task starts a fresh audio timeline
+        lineBuffer = ""
+        lastTranscription = nil
         guard isRunning else { return }
         if afterPause {
             startRecognitionTask()
@@ -501,6 +529,7 @@ final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
 
     func stop() {
         isRunning = false
+        flushPending(lastTranscription)   // write the tail before tearing down
         taskGeneration += 1
         let s = stream; stream = nil
         Task { try? await s?.stopCapture() }
@@ -508,10 +537,8 @@ final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
         audioEngine?.stop()
         audioEngine = nil
         request?.endAudio(); task?.cancel(); task = nil; request = nil
-        committedSource = ""
+        committedUpToTime = 0
         lastCommittedSentence = ""
-        stableCandidate = nil
-        pendingCommits.removeAll()
         onMain("Stopped.")
     }
 
