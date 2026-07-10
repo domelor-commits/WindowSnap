@@ -90,6 +90,7 @@ final class Settings {
         SystemTask(id: "forceQuit",            title: "Force Quit App…"),
         SystemTask(id: "commandPalette",       title: "Command Palette"),
         SystemTask(id: "shelf",                title: "Drag & Drop Shelf"),
+        SystemTask(id: "pasteAsPlainText",      title: "Paste as Plain Text"),
         SystemTask(id: "lockScreen",           title: "Lock Screen"),
         SystemTask(id: "sleepDisplay",         title: "Sleep Display"),
         SystemTask(id: "missionControl",       title: "Mission Control"),

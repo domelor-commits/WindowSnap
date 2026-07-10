@@ -24,5 +24,9 @@
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>WindowSnap transcribes captured audio to provide live meeting translation.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>WindowSnap uses the microphone to transcribe and translate nearby speech when Microphone is chosen as the audio source.</string>
 </dict>
 </plist>

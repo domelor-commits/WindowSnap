@@ -39,6 +39,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     private var clipboardPane: ClipboardHistoryPane?
     private var forceQuitPane: ForceQuitPane?
     private var commandPane: CommandPalettePane?
+    /// Stops the live translator when its tab is hidden or the window closes.
+    private var translationPaneStop: (() -> Void)?
 
     convenience init() {
         let window = NSWindow(
@@ -92,6 +94,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
 
     func windowWillClose(_ notification: Notification) {
         forceQuitPane?.stop()   // don't keep sampling CPU while the window is closed
+        translationPaneStop?()  // stop audio capture / transcription
     }
 
     /// Size the window so the entire Settings tab content is visible without
@@ -381,8 +384,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     @objc private func resetShortcuts() {
         Settings.shared.resetShortcuts()
         onShortcutsChanged?()
-        // Rebuild the window (recorder titles refresh) and stay on Settings.
-        if let content = window?.contentView { installContent(into: content, select: 2) }
+        // Rebuild the window (recorder titles refresh) and stay on the Shortcuts tab.
+        if let content = window?.contentView { installContent(into: content, select: 5) }
     }
 
     // MARK: - Window content: custom tab header (icon above label) + tab views
@@ -398,23 +401,25 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         tv.translatesAutoresizingMaskIntoConstraints = false
         tv.addTabViewItem(makeLayoutsTab())      // 0
         tv.addTabViewItem(makeAnnotateTab())     // 1
-        tv.addTabViewItem(makeShortcutsTab())    // 2
+        tv.addTabViewItem(makeShelfTab())        // 2
         tv.addTabViewItem(makeClipboardTab())    // 3
         tv.addTabViewItem(makeForceQuitTab())    // 4
-        tv.addTabViewItem(makeCommandTab())      // 5
-        tv.addTabViewItem(makeShelfTab())        // 6
-        tv.addTabViewItem(makeSettingsTab())     // 7
+        tv.addTabViewItem(makeShortcutsTab())    // 5
+        tv.addTabViewItem(makeCommandTab())      // 6
+        tv.addTabViewItem(makeTranslationTab())  // 7
+        tv.addTabViewItem(makeSettingsTab())     // 8
         tv.delegate = self
         self.tabView = tv
 
         let defs: [(String, String)] = [
             ("Layouts", "macwindow"),
             ("Annotate", "pencil.tip.crop.circle"),
-            ("Shortcuts", "command"),
+            ("Shelf", "tray.and.arrow.down"),
             ("Clipboard", "doc.on.clipboard"),
             ("Force Quit", "xmark.octagon"),
+            ("Shortcuts", "command"),
             ("Palette", "magnifyingglass"),
-            ("Shelf", "tray.and.arrow.down"),
+            ("Translation", "globe"),
             ("Settings", "gearshape"),
         ]
         let header = NSStackView()
@@ -559,6 +564,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         return item
     }
 
+    private func makeTranslationTab() -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: "translation")
+        item.label = "Translation"
+        if #available(macOS 13.0, *) {
+            let pane = TranslationPane(frame: .zero)
+            pane.autoresizingMask = [.width, .height]
+            translationPaneStop = { [weak pane] in pane?.stopIfRunning() }
+            item.view = pane
+        } else {
+            let label = NSTextField(labelWithString: "Live translation requires macOS 13 or later.")
+            label.alignment = .center
+            item.view = label
+        }
+        return item
+    }
+
     /// Start/stop per-tab live activity: the Force Quit poll runs only while its
     /// tab is showing; the clipboard/command lists refresh when revealed.
     private func syncTabActivity() {
@@ -566,6 +587,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         if sel == "forcequit" { forceQuitPane?.start() } else { forceQuitPane?.stop() }
         if sel == "clipboard" { clipboardPane?.reload() }
         if sel == "command" { commandPane?.reload() }
+        if sel != "translation" { translationPaneStop?() }   // stop listening when tab hidden
     }
 
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {

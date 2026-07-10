@@ -854,6 +854,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func toggleShelf() { ShelfController.shared.toggle() }
 
+    /// Strips formatting from the clipboard and pastes the plain text into the
+    /// frontmost app (like "Paste and Match Style", but works everywhere).
+    func pasteAsPlainText() {
+        let pb = NSPasteboard.general
+        guard let s = pb.string(forType: .string) else { NSSound.beep(); return }
+        pb.clearContents()
+        pb.setString(s, forType: .string)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { AppDelegate.synthesizeCmdV() }
+    }
+
+    /// Posts a synthetic ⌘V to the frontmost app (needs Accessibility).
+    static func synthesizeCmdV() {
+        let src = CGEventSource(stateID: .combinedSessionState)
+        let v: CGKeyCode = 9   // 'v'
+        let down = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: true)
+        down?.flags = .maskCommand
+        let up = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: false)
+        up?.flags = .maskCommand
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
+    }
+
     @objc func openCommandPalette() { CommandPalette.shared.show(actions: buildPaletteActions()) }
 
     @objc func otherAppActivated(_ note: Notification) {
@@ -1131,6 +1153,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             openCommandPalette()
         case "shelf":
             ShelfController.shared.toggle()
+        case "pasteAsPlainText":
+            pasteAsPlainText()
         case "lockScreen":
             runProcess("/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession",
                        ["-suspend"])

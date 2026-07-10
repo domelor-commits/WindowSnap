@@ -28,12 +28,12 @@ CERT_NAME="WindowSnap Self-Signed"
 if security find-certificate -c "$CERT_NAME" >/dev/null 2>&1; then
   echo "==> Code signing with stable identity: $CERT_NAME"
   echo "    (Accessibility grant will persist across versions.)"
-  codesign --force --deep --options runtime --sign "$CERT_NAME" "${APP_BUNDLE}"
+  codesign --force --deep --options runtime --entitlements WindowSnap.entitlements --sign "$CERT_NAME" "${APP_BUNDLE}"
 else
   echo "==> WARNING: No stable signing certificate found."
   echo "    Falling back to ad-hoc signing — macOS will RESET the Accessibility"
   echo "    grant on every update. To fix this permanently, run:  ./make-cert.sh"
-  codesign --force --deep --sign - "${APP_BUNDLE}"
+  codesign --force --deep --entitlements WindowSnap.entitlements --sign - "${APP_BUNDLE}"
 fi
 
 # Nudge macOS to refresh the cached bundle icon so Finder shows the new one.
