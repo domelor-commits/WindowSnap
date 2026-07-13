@@ -44,7 +44,42 @@ If you have a paid Apple Developer account, you can instead sign with your
 Developer ID (and notarize) for zero Gatekeeper friction; the persistence
 mechanism is the same.
 
+## Auto-updates (Sparkle + GitHub Releases)
 
+WindowSnap bundles [Sparkle](https://sparkle-project.org) for in-app updates.
+It stays **off until you configure it**, so the app runs fine before you set up
+hosting — "Check for Updates…" only appears once both values below are real.
+
+One-time setup:
+
+1. **Generate a signing key** (once, on your Mac):
+   ```bash
+   # Sparkle ships the tool in its SPM checkout, e.g.:
+   .build/checkouts/Sparkle/bin/generate_keys
+   ```
+   It prints an EdDSA **public key** and stores the private key in your Keychain.
+   Put the public key in `Info.plist` under `SUPublicEDKey` (replacing
+   `REPLACE_WITH_YOUR_SPARKLE_PUBLIC_KEY`).
+
+2. **Point the feed at your GitHub repo.** In `Info.plist`, set `SUFeedURL` by
+   replacing `YOUR_GITHUB` with your user/org. The default pattern uploads an
+   `appcast.xml` asset to each release and always resolves to the latest:
+   ```
+   https://github.com/<you>/WindowSnap/releases/latest/download/appcast.xml
+   ```
+
+3. **Publish a release.** For each version: bump `CFBundleShortVersionString` /
+   `CFBundleVersion`, run `./build.sh`, then sign the artifact and generate the
+   appcast entry:
+   ```bash
+   .build/checkouts/Sparkle/bin/sign_update WindowSnap.dmg      # prints the EdDSA signature
+   ```
+   Create a GitHub Release, upload `WindowSnap.dmg` **and** an `appcast.xml`
+   whose `<enclosure>` points at the DMG's download URL and carries that
+   signature. Sparkle then offers the update to existing users automatically.
+
+For zero Gatekeeper friction on other people's Macs, sign with a **Developer ID**
+and notarize the DMG; the appcast/update flow is identical.
 
 **Shortcuts** — Every action (halves, corners, thirds, maximize, center, save
 layout) has a configurable shortcut. Click a shortcut button, then press the

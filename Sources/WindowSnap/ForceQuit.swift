@@ -8,6 +8,7 @@ struct AppStatus {
     let name: String
     let icon: NSImage?
     let cpu: Double        // percent; can exceed 100 on multicore (a runaway thread)
+    let mem: UInt64        // physical memory footprint in bytes (Activity Monitor's "Memory")
     let responding: Bool
 }
 
@@ -41,7 +42,8 @@ final class ProcessMonitor {
             if let cur = cpuNow { prev[pid] = (cur, now) }
 
             out.append(AppStatus(pid: pid, name: app.localizedName ?? "Unknown",
-                                 icon: app.icon, cpu: pct, responding: Self.isResponding(pid)))
+                                 icon: app.icon, cpu: pct, mem: Self.memoryBytes(pid),
+                                 responding: Self.isResponding(pid)))
         }
         prev = prev.filter { seen.contains($0.key) }   // forget exited pids
 
@@ -61,6 +63,18 @@ final class ProcessMonitor {
         }
         guard rc == 0 else { return nil }
         return usage.ri_user_time &+ usage.ri_system_time
+    }
+
+    /// Physical memory footprint (bytes) for a pid, matching Activity Monitor's
+    /// "Memory" column. 0 if it can't be read (e.g. the process just exited).
+    private static func memoryBytes(_ pid: pid_t) -> UInt64 {
+        var usage = rusage_info_current()
+        let rc = withUnsafeMutablePointer(to: &usage) { p -> Int32 in
+            p.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                proc_pid_rusage(pid, Int32(RUSAGE_INFO_CURRENT), $0)
+            }
+        }
+        return rc == 0 ? usage.ri_phys_footprint : 0
     }
 
     /// Heuristic: probe an Accessibility attribute with a short timeout. A blocked
@@ -98,7 +112,7 @@ final class ForceQuitPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     private func build() {
-        let w: CGFloat = 480, h: CGFloat = 380
+        let w: CGFloat = 560, h: CGFloat = 380
         let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: w, height: h),
                         styleMask: [.titled, .closable], backing: .buffered, defer: false)
         p.title = "Force Quit — Activity"
@@ -110,7 +124,8 @@ final class ForceQuitPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
         table = NSTableView()
         for (id, title, width) in [("app", "Application", CGFloat(240)),
-                                   ("cpu", "CPU", 70), ("status", "Status", 130)] {
+                                   ("cpu", "CPU", 70), ("mem", "Memory", 80),
+                                   ("status", "Status", 130)] {
             let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
             c.title = title; c.width = width
             table.addTableColumn(c)
@@ -237,6 +252,10 @@ final class ForceQuitPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 tf.stringValue = "\(Int(s.cpu.rounded()))%"
                 tf.alignment = .right
                 tf.textColor = s.cpu >= 80 ? .systemOrange : .secondaryLabelColor
+            } else if id == "mem" {
+                tf.stringValue = ByteCountFormatter.string(fromByteCount: Int64(s.mem), countStyle: .memory)
+                tf.alignment = .right
+                tf.textColor = s.mem >= 2_000_000_000 ? .systemOrange : .secondaryLabelColor
             } else {   // status
                 tf.stringValue = s.responding ? "Responding" : "Not Responding"
                 tf.textColor = s.responding ? .secondaryLabelColor : .systemRed

@@ -109,7 +109,8 @@ final class ForceQuitPane: NSView, NSTableViewDataSource, NSTableViewDelegate {
 
     private func build() {
         for (id, title, width) in [("app", "Application", CGFloat(240)),
-                                   ("cpu", "CPU", 70), ("status", "Status", 130)] {
+                                   ("cpu", "CPU", 70), ("mem", "Memory", 80),
+                                   ("status", "Status", 130)] {
             let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
             c.title = title; c.width = width
             if id == "app" { c.resizingMask = .autoresizingMask }
@@ -215,6 +216,10 @@ final class ForceQuitPane: NSView, NSTableViewDataSource, NSTableViewDelegate {
             if id == "cpu" {
                 tf.stringValue = "\(Int(s.cpu.rounded()))%"; tf.alignment = .right
                 tf.textColor = s.cpu >= 80 ? .systemOrange : .secondaryLabelColor
+            } else if id == "mem" {
+                tf.stringValue = ByteCountFormatter.string(fromByteCount: Int64(s.mem), countStyle: .memory)
+                tf.alignment = .right
+                tf.textColor = s.mem >= 2_000_000_000 ? .systemOrange : .secondaryLabelColor
             } else {
                 tf.stringValue = s.responding ? "Responding" : "Not Responding"
                 tf.textColor = s.responding ? .secondaryLabelColor : .systemRed
@@ -282,14 +287,23 @@ final class CommandPalettePane: NSView, NSTableViewDataSource, NSTableViewDelega
 
     func reload() {
         all = actionsProvider?() ?? []
+        CurrencyRates.prefetch()   // warm rates for currency conversions
         applyFilter(searchField.stringValue)
     }
 
     private func applyFilter(_ q: String) {
+        var results: [PaletteAction] = []
+        if let answer = Calculator.evaluate(q) {
+            results.append(PaletteAction(title: "= \(answer)", subtitle: "Copy result") {
+                let pb = NSPasteboard.general
+                pb.clearContents(); pb.setString(answer, forType: .string)
+            })
+        }
         let ql = q.lowercased()
-        filtered = q.isEmpty ? all : all.filter {
+        let matches = q.isEmpty ? all : all.filter {
             $0.title.lowercased().contains(ql) || $0.subtitle.lowercased().contains(ql)
         }
+        filtered = results + matches
         table.reloadData()
         if !filtered.isEmpty { table.selectRowIndexes([0], byExtendingSelection: false) }
     }

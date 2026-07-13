@@ -123,6 +123,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // before lock/sleep hides the windows.
         startPeriodicSnapshot()
 
+        // Auto-update (dormant until an appcast feed + key are configured), and
+        // show the release notes once after a version bump.
+        UpdaterManager.shared.startIfConfigured()
+        WhatsNewWindowController.shared.showIfNeeded()
+
+        // Calendar access for the optional "next meeting" menu item.
+        MeetingBar.shared.requestAccessIfEnabled()
+
+        // Restore the keystroke visualizer if it was left on.
+        if Settings.shared.keystrokeVizEnabled { KeystrokeVisualizer.shared.start() }
+
         // On launch, if either required permission is missing, guide the user
         // through the setup wizard; otherwise open the main window as usual.
         if PermissionsWindowController.allGranted() {
@@ -430,7 +441,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func snap(_ region: SnapRegion) {
         guard let window = WindowController.focusedWindow(),
               let frame = WindowController.getFrame(of: window) else { return }
-        let currentScreen = screenContaining(axFrame: frame)
+        guard let currentScreen = screenContaining(axFrame: frame) else { return }
 
         // Cross-monitor cycling: if a left/right snap is pressed while the window
         // is already at that edge of the current screen, move it to the adjacent
@@ -466,7 +477,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: Edge detection (AX frame is top-left origin; convert to global)
     private func globalFrame(_ axFrame: CGRect) -> CGRect {
-        let primaryHeight = NSScreen.screens.first!.frame.maxY
+        // No screens (all displays asleep / disconnected): nothing to convert
+        // against, so return the frame unchanged rather than crash.
+        guard let primaryHeight = NSScreen.screens.first?.frame.maxY else { return axFrame }
         return CGRect(x: axFrame.minX, y: primaryHeight - axFrame.minY - axFrame.height,
                       width: axFrame.width, height: axFrame.height)
     }
@@ -512,10 +525,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return idx < ordered.count - 1 ? ordered[idx + 1] : nil
     }
 
-    func screenContaining(axFrame: CGRect) -> NSScreen {
-        let primaryHeight = NSScreen.screens.first!.frame.maxY
+    /// The screen whose frame contains the center of an AX-origin frame, or nil
+    /// when there are no screens (all displays asleep/disconnected).
+    func screenContaining(axFrame: CGRect) -> NSScreen? {
+        guard let primaryHeight = NSScreen.screens.first?.frame.maxY else { return nil }
         let center = CGPoint(x: axFrame.midX, y: primaryHeight - axFrame.midY)
-        return NSScreen.screens.first(where: { $0.frame.contains(center) }) ?? NSScreen.main!
+        return NSScreen.screens.first(where: { $0.frame.contains(center) }) ?? NSScreen.main
     }
 
     /// Overwrite a specific layout (by id) with the current windows. Used by the
@@ -731,48 +746,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// submenu always reflects the latest rolling 'Saved' capture.
     func buildMenu(into menu: NSMenu) {
         menu.removeAllItems()
-        let open = NSMenuItem(title: "Open WindowSnap…", action: #selector(openSettings), keyEquivalent: ",")
-        open.target = self
-        menu.addItem(open)
-        let perms = NSMenuItem(title: "Permissions Setup…", action: #selector(openPermissions), keyEquivalent: "")
-        perms.target = self
-        menu.addItem(perms)
+
+        func titleWithShortcut(_ name: String, key: String) -> String {
+            if let sc = Settings.shared.shortcuts[key] { return "\(name)   \(sc.display)" }
+            return name
+        }
+        func add(_ title: String, _ action: Selector, to m: NSMenu, key: String = "") -> NSMenuItem {
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            i.target = self; m.addItem(i); return i
+        }
+
+        // Next meeting (opt-in) at the very top, with a one-click Join.
+        if Settings.shared.meetingBarEnabled, let m = MeetingBar.shared.nextMeeting() {
+            let mins = Int(m.start.timeIntervalSinceNow / 60)
+            let when: String
+            if mins <= 0 { when = "now" }
+            else if mins < 60 { when = "in \(mins) min" }
+            else {
+                let f = DateFormatter(); f.timeStyle = .short
+                when = "at \(f.string(from: m.start))"
+            }
+            let mi = NSMenuItem(title: "📅  \(m.title) — \(when)", action: nil, keyEquivalent: "")
+            mi.isEnabled = false
+            menu.addItem(mi)
+            if let url = m.joinURL {
+                let join = add("      Join Meeting", #selector(joinMeeting(_:)), to: menu)
+                join.representedObject = url.absoluteString
+            }
+            menu.addItem(.separator())
+        }
+
+        _ = add("Open WindowSnap…", #selector(openSettings), to: menu, key: ",")
+        _ = add("Permissions Setup…", #selector(openPermissions), to: menu)
         menu.addItem(.separator())
-        let quick: [(String, SnapRegion)] = [
-            ("Left Half", .leftHalf), ("Right Half", .rightHalf), ("Maximize", .maximize)
+
+        // Snap ▸ — all window-placement actions in one tidy submenu.
+        let snapParent = NSMenuItem(title: "Snap", action: nil, keyEquivalent: "")
+        let snapMenu = NSMenu()
+        let snaps: [(String, SnapRegion)] = [
+            ("Left Half", .leftHalf), ("Right Half", .rightHalf),
+            ("Top Half", .topHalf), ("Bottom Half", .bottomHalf),
+            ("Top Left", .topLeft), ("Top Right", .topRight),
+            ("Bottom Left", .bottomLeft), ("Bottom Right", .bottomRight),
+            ("Left Third", .leftThird), ("Center Third", .centerThird), ("Right Third", .rightThird),
+            ("Maximize", .maximize), ("Center", .center),
         ]
-        for (label, region) in quick {
-            let i = NSMenuItem(title: label, action: #selector(menuSnap(_:)), keyEquivalent: "")
-            i.representedObject = region.rawValue; i.target = self
-            menu.addItem(i)
+        for (label, region) in snaps {
+            let i = add(titleWithShortcut(label, key: region.rawValue), #selector(menuSnap(_:)), to: snapMenu)
+            i.representedObject = region.rawValue
+        }
+        menu.addItem(snapParent); menu.setSubmenu(snapMenu, for: snapParent)
+
+        // Layouts: Default restore + a submenu of saved layouts.
+        let defaultRestore = add(titleWithShortcut("Restore Default Layout", key: "restoreDefault"),
+                                 #selector(restoreDefaultFromMenu), to: menu)
+        defaultRestore.isEnabled = (LayoutManager.loadDefault() != nil)
+        let layouts = LayoutManager.loadAll()
+        if layouts.isEmpty {
+            let none = NSMenuItem(title: "No saved layouts", action: nil, keyEquivalent: "")
+            none.isEnabled = false; menu.addItem(none)
+        } else {
+            let restoreMenu = NSMenu()
+            for (i, layout) in layouts.enumerated() {
+                let item = add(titleWithShortcut(layout.name, key: "restoreLayout:\(layout.id)"),
+                               #selector(restoreLayoutAtIndex(_:)), to: restoreMenu)
+                item.tag = i
+            }
+            let restoreParent = NSMenuItem(title: "Restore Saved Layout", action: nil, keyEquivalent: "")
+            menu.addItem(restoreParent); menu.setSubmenu(restoreMenu, for: restoreParent)
         }
         menu.addItem(.separator())
 
-        // Screen OCR — show the bound launcher shortcut when one is assigned.
+        // Tools ▸ — capture, clipboard, palette, shelf, force quit.
+        let toolsParent = NSMenuItem(title: "Tools", action: nil, keyEquivalent: "")
+        let toolsMenu = NSMenu()
         let ocrSlot = Settings.shared.functionKeyApps.first(where: { $0.value == "system:ocrArea" })?.key
         let ocrKey = ocrSlot.flatMap { Settings.shared.shortcuts["launcher:\($0)"] }?.display
-        let ocrTitle = ocrKey.map { "Copy Text from Screen   \($0)" } ?? "Copy Text from Screen"
-        let ocrItem = NSMenuItem(title: ocrTitle, action: #selector(ocrScreenRegion), keyEquivalent: "")
-        ocrItem.target = self
-        menu.addItem(ocrItem)
-
-        // Clipboard history picker.
-        let clipItem = NSMenuItem(title: "Clipboard History…", action: #selector(openClipboardHistory), keyEquivalent: "")
-        clipItem.target = self
-        menu.addItem(clipItem)
-
-        // Force Quit / activity monitor.
-        let fqItem = NSMenuItem(title: "Force Quit App…", action: #selector(openForceQuit), keyEquivalent: "")
-        fqItem.target = self
-        menu.addItem(fqItem)
-
-        // Command palette + drag-and-drop shelf.
-        let cpItem = NSMenuItem(title: "Command Palette…", action: #selector(openCommandPalette), keyEquivalent: "")
-        cpItem.target = self
-        menu.addItem(cpItem)
-        let shelfItem = NSMenuItem(title: "Drag & Drop Shelf", action: #selector(toggleShelf), keyEquivalent: "")
-        shelfItem.target = self
-        menu.addItem(shelfItem)
+        _ = add(ocrKey.map { "Copy Text from Screen   \($0)" } ?? "Copy Text from Screen",
+                #selector(ocrScreenRegion), to: toolsMenu)
+        _ = add("Dictate Anywhere", #selector(startDictation), to: toolsMenu)
+        _ = add("Window Switcher", #selector(openWindowSwitcher), to: toolsMenu)
+        let kv = add("Keystroke Visualizer", #selector(toggleKeystrokeViz), to: toolsMenu)
+        kv.state = KeystrokeVisualizer.shared.isActive ? .on : .off
+        _ = add("Clipboard History…", #selector(openClipboardHistory), to: toolsMenu)
+        _ = add("Command Palette…", #selector(openCommandPalette), to: toolsMenu)
+        _ = add("Drag & Drop Shelf", #selector(toggleShelf), to: toolsMenu)
+        _ = add("Force Quit App…", #selector(openForceQuit), to: toolsMenu)
+        menu.addItem(toolsParent); menu.setSubmenu(toolsMenu, for: toolsParent)
 
         // Keep Awake ("caffeine") submenu: off / indefinite / timed.
         let ka = KeepAwake.shared
@@ -781,53 +841,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let kaSub = NSMenu()
         for (label, tag) in [("Off", "off"), ("Indefinitely", "inf"),
                              ("For 30 Minutes", "30"), ("For 1 Hour", "60"), ("For 2 Hours", "120")] {
-            let it = NSMenuItem(title: label, action: #selector(keepAwakeSelected(_:)), keyEquivalent: "")
-            it.representedObject = tag; it.target = self
+            let it = add(label, #selector(keepAwakeSelected(_:)), to: kaSub)
+            it.representedObject = tag
             if (!ka.isActive && tag == "off") || (ka.isActive && ka.expiry == nil && tag == "inf") { it.state = .on }
-            kaSub.addItem(it)
         }
         kaParent.submenu = kaSub
         menu.addItem(kaParent)
 
+        _ = add("Keyboard Shortcuts…", #selector(showCheatSheet), to: menu)
         menu.addItem(.separator())
 
-        func titleWithShortcut(_ name: String, key: String) -> String {
-            if let sc = Settings.shared.shortcuts[key] {
-                return "\(name)   \(sc.display)"
-            }
-            return name
-        }
-
-        let defaultRestore = NSMenuItem(
-            title: titleWithShortcut("Restore Default Layout", key: "restoreDefault"),
-            action: #selector(restoreDefaultFromMenu), keyEquivalent: "")
-        defaultRestore.target = self
-        defaultRestore.isEnabled = (LayoutManager.loadDefault() != nil)
-        menu.addItem(defaultRestore)
-
-        let layouts = LayoutManager.loadAll()
-        if layouts.isEmpty {
-            let none = NSMenuItem(title: "No saved layouts", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            menu.addItem(none)
-        } else {
-            let restoreMenu = NSMenu()
-            for (i, layout) in layouts.enumerated() {
-                // Show the per-layout restore shortcut set in the Layouts tab.
-                let item = NSMenuItem(
-                    title: titleWithShortcut(layout.name, key: "restoreLayout:\(layout.id)"),
-                    action: #selector(restoreLayoutAtIndex(_:)), keyEquivalent: "")
-                item.tag = i; item.target = self
-                restoreMenu.addItem(item)
-            }
-            let restoreParent = NSMenuItem(title: "Restore Saved Layout", action: nil, keyEquivalent: "")
-            menu.addItem(restoreParent)
-            menu.setSubmenu(restoreMenu, for: restoreParent)
+        _ = add("What’s New…", #selector(showWhatsNew), to: menu)
+        if UpdaterManager.shared.isConfigured {
+            _ = add("Check for Updates…", #selector(checkForUpdates), to: menu)
         }
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit WindowSnap", action: #selector(NSApp.terminate(_:)), keyEquivalent: "q")
-        menu.addItem(quit)
+        menu.addItem(NSMenuItem(title: "Quit WindowSnap", action: #selector(NSApp.terminate(_:)), keyEquivalent: "q"))
     }
+
+    @objc func joinMeeting(_ sender: NSMenuItem) {
+        guard let s = sender.representedObject as? String, let url = URL(string: s) else { return }
+        NSWorkspace.shared.open(url)
+    }
+    @objc func startDictation() { if #available(macOS 14.0, *) { Dictation.shared.toggle() } }
+    @objc func openWindowSwitcher() { WindowSwitcher.shared.toggle() }
+    @objc func toggleKeystrokeViz() { KeystrokeVisualizer.shared.toggle() }
+    @objc func showCheatSheet() { CheatSheetOverlay.shared.toggle() }
+    @objc func showWhatsNew() { WhatsNewWindowController.shared.show() }
+    @objc func checkForUpdates() { UpdaterManager.shared.checkForUpdates() }
 
     // NSMenuDelegate: rebuild the status menu each time it opens so the
     // saved-layouts submenu reflects the latest rolling 'Saved' capture.
@@ -1143,6 +1184,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             toggleDesktopIcons()
         case "ocrArea":
             ocrScreenRegion()
+        case "dictate":
+            if #available(macOS 14.0, *) { Dictation.shared.toggle() }
+        case "windowSwitcher":
+            WindowSwitcher.shared.toggle()
+        case "keystrokeViz":
+            KeystrokeVisualizer.shared.toggle()
         case "clipboardHistory":
             ClipboardHistoryPanel.shared.show()
         case "keepAwakeToggle":
@@ -1151,6 +1198,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ForceQuitPanel.shared.show()
         case "commandPalette":
             openCommandPalette()
+        case "cheatSheet":
+            CheatSheetOverlay.shared.toggle()
         case "shelf":
             ShelfController.shared.toggle()
         case "pasteAsPlainText":

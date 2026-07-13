@@ -7,5 +7,18 @@
          "Microphone" audio source. -->
     <key>com.apple.security.device.audio-input</key>
     <true/>
+    <!-- Allow loading the bundled Sparkle.framework. Under the hardened runtime,
+         Library Validation otherwise requires every loaded framework to share the
+         app's Team ID; a self-signed identity has none, so it would be rejected.
+         (With a real Developer ID that signs the app + framework together, this
+         isn't required, but it's harmless to keep.) -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- Read the user's calendar for the "next meeting" menu-bar feature. -->
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+    <!-- Send Apple Events (to Calendar) so a created event can be opened for editing. -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
 </dict>
 </plist>

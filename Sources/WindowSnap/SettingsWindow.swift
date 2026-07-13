@@ -4,7 +4,7 @@ import ApplicationServices
 import UniformTypeIdentifiers
 
 /// The main app window with three tabs: Layouts, Settings, Annotate.
-final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTabViewDelegate {
+final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTabViewDelegate, NSPopoverDelegate {
 
     var onShortcutsChanged: (() -> Void)?
     var onSnapRequested: ((SnapRegion) -> Void)?
@@ -16,6 +16,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     private var defaultCanvas: LayoutCanvas!
     private var defaultTableView: NSTableView!
     private var mainTableView: NSTableView!
+    private var rowShortcutPopover: NSPopover?
     private var selectedLayoutID: String?
     /// The most recently selected SAVED layout id (from the main table only).
     /// Used to keep the Saved Layout canvas populated even when focus moves to
@@ -38,7 +39,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     // In-window feature tabs (mirror the shared data behind the floating panels).
     private var clipboardPane: ClipboardHistoryPane?
     private var forceQuitPane: ForceQuitPane?
-    private var commandPane: CommandPalettePane?
     /// Stops the live translator when its tab is hidden or the window closes.
     private var translationPaneStop: (() -> Void)?
 
@@ -183,12 +183,41 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
             state: s.clipboardHistoryEnabled, action: #selector(toggleClipboardHistory(_:))))
         doc.addArrangedSubview(checkbox("Paste the chosen clip into the frontmost app automatically",
             state: s.clipboardAutoPaste, action: #selector(toggleClipboardAutoPaste(_:))))
+        doc.addArrangedSubview(checkbox("Save clipboard history to disk (off keeps it in memory for this session only)",
+            state: s.clipboardPersistToDisk, action: #selector(toggleClipboardPersist(_:))))
         doc.addArrangedSubview(checkbox("When my Mac goes on standby or is locked, overwrite the Default layout with the current windows",
             state: s.overwriteOnStandby || s.overwriteOnLock, action: #selector(toggleOverwriteOnStandbyOrLock(_:))))
         doc.addArrangedSubview(checkbox("When my Mac wakes from standby, restore windows to the Default layout",
             state: s.restoreOnWake, action: #selector(toggleRestoreOnWake(_:))))
         doc.addArrangedSubview(checkbox("Show magnifier while selecting a screen capture",
             state: s.overlayShowMagnifier, action: #selector(toggleShowMagnifier(_:))))
+        doc.addArrangedSubview(checkbox("Show my next meeting in the menu (requires Calendar access)",
+            state: s.meetingBarEnabled, action: #selector(toggleMeetingBar(_:))))
+        doc.addArrangedSubview(checkbox("Show pressed keys on screen (keystroke visualizer, for demos & recordings)",
+            state: s.keystrokeVizEnabled, action: #selector(toggleKeystrokeVizSetting(_:))))
+
+        // Dictation language picker (used by "Dictate Anywhere").
+        let dictRow = NSStackView()
+        dictRow.orientation = .horizontal; dictRow.spacing = 8
+        dictRow.addArrangedSubview(NSTextField(labelWithString: "Dictation language:"))
+        let dictPopup = NSPopUpButton()
+        dictPopup.addItem(withTitle: "Automatic (detect)")
+        dictPopup.lastItem?.representedObject = ""
+        let dictLangs: [(String, String)] = [
+            ("English", "en"), ("Chinese", "zh"), ("Cantonese", "yue"), ("Thai", "th"),
+            ("Malay", "ms"), ("Indonesian", "id"), ("Vietnamese", "vi"), ("Tagalog", "tl"),
+            ("Japanese", "ja"), ("Korean", "ko"), ("Spanish", "es"), ("French", "fr"),
+            ("German", "de"), ("Hindi", "hi"), ("Arabic", "ar"),
+        ]
+        for (n, c) in dictLangs {
+            dictPopup.addItem(withTitle: n); dictPopup.lastItem?.representedObject = c
+        }
+        for item in dictPopup.itemArray where (item.representedObject as? String) == s.dictationLanguage {
+            dictPopup.select(item)
+        }
+        dictPopup.target = self; dictPopup.action = #selector(dictationLanguageChanged(_:))
+        dictRow.addArrangedSubview(dictPopup)
+        doc.addArrangedSubview(dictRow)
 
         // Accessibility access row (moved here from the Layouts tab).
         let grantRow = NSStackView()
@@ -401,24 +430,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         tv.translatesAutoresizingMaskIntoConstraints = false
         tv.addTabViewItem(makeLayoutsTab())      // 0
         tv.addTabViewItem(makeAnnotateTab())     // 1
-        tv.addTabViewItem(makeShelfTab())        // 2
-        tv.addTabViewItem(makeClipboardTab())    // 3
-        tv.addTabViewItem(makeForceQuitTab())    // 4
-        tv.addTabViewItem(makeShortcutsTab())    // 5
-        tv.addTabViewItem(makeCommandTab())      // 6
-        tv.addTabViewItem(makeTranslationTab())  // 7
-        tv.addTabViewItem(makeSettingsTab())     // 8
+        tv.addTabViewItem(makeClipboardTab())    // 2
+        tv.addTabViewItem(makeForceQuitTab())    // 3
+        tv.addTabViewItem(makeShortcutsTab())    // 4
+        tv.addTabViewItem(makeConversionTab())   // 5
+        tv.addTabViewItem(makeTranslationTab())  // 6
+        tv.addTabViewItem(makeSettingsTab())     // 7
         tv.delegate = self
         self.tabView = tv
 
         let defs: [(String, String)] = [
             ("Layouts", "macwindow"),
             ("Annotate", "pencil.tip.crop.circle"),
-            ("Shelf", "tray.and.arrow.down"),
             ("Clipboard", "doc.on.clipboard"),
             ("Force Quit", "xmark.octagon"),
             ("Shortcuts", "command"),
-            ("Palette", "magnifyingglass"),
+            ("Convert", "arrow.left.arrow.right"),
             ("Translation", "globe"),
             ("Settings", "gearshape"),
         ]
@@ -543,24 +570,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         return item
     }
 
-    private func makeCommandTab() -> NSTabViewItem {
-        let item = NSTabViewItem(identifier: "command")
-        item.label = "Palette"
-        let pane = CommandPalettePane(frame: .zero)
+    private func makeConversionTab() -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: "conversion")
+        item.label = "Convert"
+        let pane = ConversionPane(frame: .zero)
         pane.autoresizingMask = [.width, .height]
-        pane.actionsProvider = { [weak self] in self?.paletteActionsProvider?() ?? [] }
-        pane.runAction = { [weak self] in self?.runPaletteAction?($0) }
-        commandPane = pane
         item.view = pane
-        return item
-    }
-
-    private func makeShelfTab() -> NSTabViewItem {
-        let item = NSTabViewItem(identifier: "shelf")
-        item.label = "Shelf"
-        let view = ShelfDropView(frame: .zero)
-        view.autoresizingMask = [.width, .height]
-        item.view = view
         return item
     }
 
@@ -586,7 +601,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         let sel = tabView?.selectedTabViewItem?.identifier as? String
         if sel == "forcequit" { forceQuitPane?.start() } else { forceQuitPane?.stop() }
         if sel == "clipboard" { clipboardPane?.reload() }
-        if sel == "command" { commandPane?.reload() }
         if sel != "translation" { translationPaneStop?() }   // stop listening when tab hidden
     }
 
@@ -666,6 +680,18 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     @objc private func toggleShowMagnifier(_ s: NSButton) {
         Settings.shared.overlayShowMagnifier = s.state == .on; Settings.shared.save()
     }
+    @objc private func toggleMeetingBar(_ s: NSButton) {
+        Settings.shared.meetingBarEnabled = s.state == .on; Settings.shared.save()
+        if s.state == .on { MeetingBar.shared.requestAccessIfEnabled() }
+    }
+    @objc private func toggleKeystrokeVizSetting(_ s: NSButton) {
+        // start()/stop() persist the setting and start/stop the global monitor.
+        if s.state == .on { KeystrokeVisualizer.shared.start() } else { KeystrokeVisualizer.shared.stop() }
+    }
+    @objc private func dictationLanguageChanged(_ sender: NSPopUpButton) {
+        Settings.shared.dictationLanguage = (sender.selectedItem?.representedObject as? String) ?? ""
+        Settings.shared.save()
+    }
     @objc private func toggleDragToSnap(_ s: NSButton) {
         Settings.shared.dragToSnapEnabled = s.state == .on; Settings.shared.save()
         NotificationCenter.default.post(name: .windowSnapDragToSnapToggled, object: nil)
@@ -680,6 +706,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     }
     @objc private func toggleClipboardAutoPaste(_ s: NSButton) {
         Settings.shared.clipboardAutoPaste = s.state == .on; Settings.shared.save()
+    }
+    @objc private func toggleClipboardPersist(_ s: NSButton) {
+        Settings.shared.clipboardPersistToDisk = s.state == .on; Settings.shared.save()
+        // Write the current history now, or delete the on-disk store immediately.
+        ClipboardHistory.shared.syncPersistence()
     }
     @objc private func toggleRestoreOnWake(_ s: NSButton) {
         Settings.shared.restoreOnWake = s.state == .on
@@ -1432,73 +1463,157 @@ extension SettingsWindowController: NSTableViewDataSource, NSTableViewDelegate {
         return cell
     }
 
-    /// The Overwrite-shortcut · Restore-shortcut · Clear button row under a name.
-    /// `restoreKey` is the restore shortcut key; the overwrite key is derived from
-    /// the layout id. Clear wipes BOTH shortcuts.
+    /// The action row shown under each layout name: a **Restore** button and an
+    /// **Overwrite** button (both act immediately on click — no shortcut needed),
+    /// plus a **Shortcut** button that opens a popover for assigning/clearing the
+    /// restore & overwrite hotkeys. Separating the actions from shortcut
+    /// assignment is the key usability fix: previously these controls doubled as
+    /// key recorders, so with no hotkey bound a click recorded a key instead of
+    /// restoring/overwriting.
     private func makeActionButtonsRow(id: String, name: String, key restoreKey: String) -> NSView {
-        let overwriteKey: String
-        if LayoutManager.isPinned(id) {
-            overwriteKey = (id == LayoutManager.defaultLayoutID) ? "overwriteDefault" : "overwritePresentation"
+        let overwriteKey = overwriteShortcutKey(for: id)
+
+        let restoreBtn = NSButton(title: " Restore", target: self, action: #selector(restoreRowButton(_:)))
+        restoreBtn.image = NSImage(systemSymbolName: "arrow.uturn.backward", accessibilityDescription: "Restore")
+        restoreBtn.imagePosition = .imageLeading
+        restoreBtn.identifier = NSUserInterfaceItemIdentifier("rowRestore:\(id)")
+        restoreBtn.toolTip = "Restore “\(name)” — put your windows back to this saved arrangement."
+
+        let overwriteBtn = NSButton(title: " Overwrite", target: self, action: #selector(overwriteRowButton(_:)))
+        overwriteBtn.image = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "Overwrite")
+        overwriteBtn.imagePosition = .imageLeading
+        overwriteBtn.identifier = NSUserInterfaceItemIdentifier("rowOverwrite:\(id)")
+        overwriteBtn.toolTip = "Overwrite “\(name)” with your current window arrangement."
+
+        // Shortcut button: shows the restore hotkey when set, else a prompt.
+        let restoreSC = Settings.shared.shortcuts[restoreKey]
+        let overwriteSC = Settings.shared.shortcuts[overwriteKey]
+        let shortcutBtn = NSButton(title: restoreSC.map { " \($0.display)" } ?? " Shortcut",
+                                   target: self, action: #selector(openShortcutPopover(_:)))
+        shortcutBtn.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "Shortcuts")
+        shortcutBtn.imagePosition = .imageLeading
+        shortcutBtn.identifier = NSUserInterfaceItemIdentifier("rowShortcut:\(id)")
+        shortcutBtn.contentTintColor = (restoreSC != nil || overwriteSC != nil) ? .controlAccentColor : nil
+        if let r = restoreSC {
+            shortcutBtn.toolTip = "Restore: \(r.display)" + (overwriteSC.map { " · Overwrite: \($0.display)" } ?? "") + "  (click to change)"
+        } else if let o = overwriteSC {
+            shortcutBtn.toolTip = "Overwrite: \(o.display)  (click to change)"
         } else {
-            overwriteKey = "overwriteLayout:\(id)"
+            shortcutBtn.toolTip = "Set a keyboard shortcut for “\(name)”."
         }
 
-        let overwriteControl = makeShortcutControl(key: overwriteKey, id: id, name: name, isOverwrite: true)
-        let restoreControl = makeShortcutControl(key: restoreKey, id: id, name: name, isOverwrite: false)
-
-        let clearBtn = NSButton(title: "Clear", target: self, action: #selector(clearRowShortcut(_:)))
-        clearBtn.bezelStyle = .rounded
-        clearBtn.controlSize = .small
-        clearBtn.font = .systemFont(ofSize: 11)
-        clearBtn.toolTip = "Clear both the overwrite and restore shortcuts for “\(name)”."
-        // Encode both keys so the handler can clear them together.
-        clearBtn.identifier = NSUserInterfaceItemIdentifier("rowClear:\(restoreKey)||\(overwriteKey)")
-
-        for (v, w) in [(overwriteControl, CGFloat(92)), (restoreControl, 92), (clearBtn, 46)] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            v.widthAnchor.constraint(equalToConstant: w).isActive = true
+        for b in [restoreBtn, overwriteBtn, shortcutBtn] {
+            b.bezelStyle = .rounded
+            b.controlSize = .small
+            b.font = .systemFont(ofSize: 11)
         }
 
-        // Restore (↻) sits to the LEFT of Overwrite (💾).
-        let stack = NSStackView(views: [restoreControl, overwriteControl, clearBtn])
+        let stack = NSStackView(views: [restoreBtn, overwriteBtn, shortcutBtn])
         stack.orientation = .horizontal
-        stack.spacing = 4
+        stack.spacing = 6
         stack.alignment = .centerY
         stack.distribution = .fill
         return stack
     }
 
-    /// Builds one shortcut control: while unbound it records a shortcut; once
-    /// bound it becomes a button that performs the action (overwrite or restore)
-    /// on click. The bound hotkey also works globally.
-    private func makeShortcutControl(key: String, id: String, name: String, isOverwrite: Bool) -> NSView {
-        // 💾 (save) for overwrite, ↻ (restore) for restore.
-        let glyph = isOverwrite ? "💾" : "↻"
-        if let sc = Settings.shared.shortcuts[key] {
-            let btn = NSButton(title: "\(glyph) \(sc.display)", target: self,
-                               action: isOverwrite ? #selector(overwriteRowButton(_:)) : #selector(restoreRowButton(_:)))
-            btn.identifier = NSUserInterfaceItemIdentifier((isOverwrite ? "rowOverwrite:" : "rowRestore:") + id)
-            btn.toolTip = isOverwrite
-                ? "Click to overwrite “\(name)” with the current windows (or press \(sc.display)). Use Clear to change."
-                : "Click to restore “\(name)” (or press \(sc.display)). Use Clear to change."
-            btn.bezelStyle = .rounded; btn.controlSize = .small; btn.font = .systemFont(ofSize: 11)
-            return btn
+    /// Settings key holding the overwrite shortcut for a layout id.
+    private func overwriteShortcutKey(for id: String) -> String {
+        if LayoutManager.isPinned(id) {
+            return id == LayoutManager.defaultLayoutID ? "overwriteDefault" : "overwritePresentation"
         }
-        let recorder = ShortcutRecorder(regionKey: key, current: nil) { [weak self] sc in
-            Settings.shared.setShortcut(key, sc)
-            self?.onShortcutsChanged?()
-            self?.reloadLayoutTables()
+        return "overwriteLayout:\(id)"
+    }
+
+    /// Settings key holding the restore shortcut for a layout id.
+    private func restoreShortcutKey(for id: String) -> String {
+        if LayoutManager.isPinned(id) {
+            return id == LayoutManager.defaultLayoutID ? "restoreDefault" : "restorePresentation"
         }
-        recorder.onClear = { [weak self] in
-            Settings.shared.clearShortcut(key)
-            self?.onShortcutsChanged?()
+        return "restoreLayout:\(id)"
+    }
+
+    /// Display name for a layout id.
+    private func layoutDisplayName(for id: String) -> String {
+        if LayoutManager.isPinned(id) { return LayoutManager.pinnedName(for: id) }
+        return layouts.first(where: { $0.id == id })?.name ?? "Layout"
+    }
+
+    /// Popover for assigning/clearing the restore & overwrite hotkeys for a layout.
+    @objc private func openShortcutPopover(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue, raw.hasPrefix("rowShortcut:") else { return }
+        let id = String(raw.dropFirst("rowShortcut:".count))
+        let name = layoutDisplayName(for: id)
+        let restoreKey = restoreShortcutKey(for: id)
+        let overwriteKey = overwriteShortcutKey(for: id)
+
+        func recorder(for key: String) -> ShortcutRecorder {
+            let rec = ShortcutRecorder(regionKey: key, current: Settings.shared.shortcuts[key]) { [weak self] sc in
+                Settings.shared.setShortcut(key, sc); self?.onShortcutsChanged?()
+            }
+            rec.onClear = { [weak self] in Settings.shared.clearShortcut(key); self?.onShortcutsChanged?() }
+            rec.controlSize = .regular; rec.font = .systemFont(ofSize: 12)
+            rec.translatesAutoresizingMaskIntoConstraints = false
+            rec.widthAnchor.constraint(equalToConstant: 170).isActive = true
+            return rec
         }
-        recorder.title = "\(glyph) set key"
-        recorder.toolTip = isOverwrite
-            ? "Click, then press a key to set an OVERWRITE shortcut for “\(name)”."
-            : "Click, then press a key to set a RESTORE shortcut for “\(name)”."
-        recorder.bezelStyle = .rounded; recorder.controlSize = .small; recorder.font = .systemFont(ofSize: 11)
-        return recorder
+        func labeledRow(_ text: String, _ rec: NSView) -> NSStackView {
+            let l = NSTextField(labelWithString: text)
+            l.font = .systemFont(ofSize: 12)
+            l.translatesAutoresizingMaskIntoConstraints = false
+            l.widthAnchor.constraint(equalToConstant: 78).isActive = true
+            let row = NSStackView(views: [l, rec])
+            row.orientation = .horizontal; row.spacing = 8; row.distribution = .fill
+            row.translatesAutoresizingMaskIntoConstraints = false
+            return row
+        }
+
+        let title = NSTextField(labelWithString: "Keyboard shortcuts")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        let subtitle = NSTextField(labelWithString: name)
+        subtitle.font = .systemFont(ofSize: 11); subtitle.textColor = .secondaryLabelColor
+
+        let restoreRow = labeledRow("Restore", recorder(for: restoreKey))
+        let overwriteRow = labeledRow("Overwrite", recorder(for: overwriteKey))
+
+        let clearBtn = NSButton(title: "Clear both", target: self, action: #selector(clearRowShortcut(_:)))
+        clearBtn.bezelStyle = .rounded; clearBtn.controlSize = .small; clearBtn.font = .systemFont(ofSize: 11)
+        clearBtn.identifier = NSUserInterfaceItemIdentifier("rowClear:\(restoreKey)||\(overwriteKey)")
+
+        let hint = NSTextField(labelWithString: "Click a field, then press keys. ⌫ clears one.")
+        hint.font = .systemFont(ofSize: 10); hint.textColor = .tertiaryLabelColor
+
+        let stack = NSStackView(views: [title, subtitle, restoreRow, overwriteRow, clearBtn, hint])
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let content = NSView()
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+        ])
+        content.layoutSubtreeIfNeeded()
+        content.frame = NSRect(origin: .zero, size: content.fittingSize)
+
+        let vc = NSViewController(); vc.view = content
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = vc
+        popover.contentSize = content.frame.size
+        popover.delegate = self
+        rowShortcutPopover = popover
+        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
+    }
+
+    // Refresh the rows (so the Shortcut buttons show updated bindings) once the
+    // popover closes — done here rather than on each keystroke so editing both
+    // shortcuts doesn't rebuild (and dismiss) the popover mid-interaction.
+    func popoverDidClose(_ notification: Notification) {
+        rowShortcutPopover = nil
+        reloadLayoutTables()
     }
 
     /// Reload both layout tables (used when an inline shortcut is set/cleared).
@@ -1543,6 +1658,15 @@ extension SettingsWindowController: NSTableViewDataSource, NSTableViewDelegate {
     @objc private func overwriteRowButton(_ sender: NSButton) {
         guard let raw = sender.identifier?.rawValue, raw.hasPrefix("rowOverwrite:") else { return }
         let id = String(raw.dropFirst("rowOverwrite:".count))
+        // Confirm — overwrite replaces the saved windows and can't be undone, and
+        // the button now sits right next to Restore.
+        let name = layoutDisplayName(for: id)
+        let confirm = NSAlert()
+        confirm.messageText = "Overwrite “\(name)”?"
+        confirm.informativeText = "This replaces the windows saved in “\(name)” with your current arrangement. This can’t be undone."
+        confirm.addButton(withTitle: "Overwrite")
+        confirm.addButton(withTitle: "Cancel")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
         // Pinned (Default) layout: recapture into its own store.
         if LayoutManager.isPinned(id) {
             var fresh = LayoutManager.capture(named: LayoutManager.pinnedName(for: id))

@@ -6,6 +6,7 @@ import Translation
 import NaturalLanguage
 import CoreMedia
 import AVFoundation
+import WhisperKit
 
 // MARK: - On-device translation bridge (macOS 15+)
 
@@ -137,7 +138,7 @@ enum AudioSource {
     case microphone                   // the Mac's mic (people in the room)
 }
 
-@available(macOS 13.0, *)
+@available(macOS 14.0, *)
 final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
     var onLiveSource: ((String) -> Void)?
     var onLiveTranslation: ((String) -> Void)?
@@ -148,344 +149,156 @@ final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
     let translator = Translator()
     var autoDetect = false
 
+    // WhisperKit speech-to-text (large-v3-turbo). The model is heavy to load, so
+    // it's cached across Start/Stop.
+    private static var shared: WhisperKit?
+    private static var loadedHighAccuracy: Bool?   // mode the cached model was loaded for
+    private var whisper: WhisperKit?
+    private var whisperLang: String?             // ISO code; nil = Whisper auto-detect
+    // Newest audio kept unconfirmed so a segment gets right-context before it is
+    // finalized. Tonal, space-less languages (Thai, Lao, Khmer, Burmese) need
+    // more surrounding audio to disambiguate tones and word boundaries, so this
+    // is deliberately generous rather than the ~0.4s a Latin-script language
+    // could get away with.
+    private let holdback: Float = 1.0
+    // Don't attempt a decode until at least this much audio has accumulated.
+    // Whisper's large models are trained on long windows and transcribe sub-second
+    // clips very poorly (garbled output / wrong tones for Thai); ~1.2s of context
+    // dramatically improves accuracy at the cost of a little added latency.
+    private let minTranscribeSamples = 19_200   // 1.2s at 16 kHz
+    // Below this RMS the window is treated as silence and not transcribed
+    // (speech is typically ~0.02+; near-silence ~0.001).
+    private let silenceRMS: Float = 0.005
+
+    // Audio capture → a rolling 16 kHz mono sample window.
     private var stream: SCStream?
-    private var audioEngine: AVAudioEngine?     // microphone source
+    private var audioEngine: AVAudioEngine?
     private var audioSource: AudioSource = .system
     private let audioQueue = DispatchQueue(label: "windowsnap.translate.audio")
-    private var recognizer: SFSpeechRecognizer?
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-    private var task: SFSpeechRecognitionTask?
-    private var sourceLocale = Locale(identifier: "en-US")
+    private var windowSamples: [Float] = []      // only touched on audioQueue
+    private var transcribing = false
+
+    // Ordered commit + translation (drives the book-style display).
     private var targetLocale = Locale(identifier: "en")
-    private var currentLangCode = "en"
     private var lastPartialTranslate = Date.distantPast
-    private var committedUpToTime: TimeInterval = 0   // audio time already flushed (per task)
-    private var lineBuffer = ""        // display-final text awaiting a sentence boundary
-    private var lastTranscription: SFTranscription?   // kept so task-end can flush the tail
-    private let holdback: TimeInterval = 1.5          // audio older than this is display-final
-    // 1.5s is the tested-clean margin: the recognizer keeps revising recent text
-    // for roughly a second, and committing sooner (0.7s) let those revisions
-    // rewrite already-written lines. Latency is instead cut via short lines.
-    private var lastCommittedSentence = "" // duplicate guard for commits
-    private var commitSeq = 0              // sequence number assigned to each finalized line
-    private var nextEmit = 0               // next sequence to hand to the UI (keeps order)
+    private var lastCommittedSentence = ""
+    // Rolling tail of recently committed source text, fed to Whisper as a
+    // conditioning prompt so each new window decodes with context (Whisper's
+    // "condition on previous text"). Improves continuity and cuts re-hallucination,
+    // which matters most for context-dependent scripts like Thai and Chinese.
+    private var promptText = ""
+    private let promptCharLimit = 200
+    private var commitSeq = 0
+    private var nextEmit = 0
     private var pendingCommits: [Int: (String, String)] = [:]
-    private var taskGeneration = 0         // invalidates callbacks from cancelled tasks
     private(set) var isRunning = false
 
-    func setLanguages(source: Locale?, target: Locale) {
+    /// `sourceCode` is a Whisper language code ("zh", "en", …) or nil to auto-detect.
+    func setLanguages(sourceCode: String?, target: Locale) {
         targetLocale = target
-        if let source = source {
-            autoDetect = false; sourceLocale = source
-        } else {
-            autoDetect = true; sourceLocale = Locale(identifier: Locale.current.identifier)
-        }
-        currentLangCode = sourceLocale.language.languageCode?.identifier ?? "en"
-        // Give the translator an explicit source when known; nil while auto-detecting.
-        translator.configure(source: autoDetect ? nil : source, target: target)
+        autoDetect = (sourceCode == nil)
+        whisperLang = sourceCode
+        translator.configure(source: sourceCode.map { Locale(identifier: $0) }, target: target)
     }
 
     func setAudioSource(_ s: AudioSource) { audioSource = s }
 
     func start() {
-        SFSpeechRecognizer.requestAuthorization { [weak self] status in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                guard status == .authorized else {
-                    self.onStatus?("Speech Recognition isn't authorized. Enable WindowSnap under System Settings → Privacy & Security → Speech Recognition.")
-                    return
-                }
-                self.beginCapture()
-            }
-        }
-    }
-
-    private func beginCapture() {
-        guard let rec = SFSpeechRecognizer(locale: sourceLocale), rec.isAvailable else {
-            onStatus?("Speech recognition isn't available for that language."); return
-        }
-        recognizer = rec
         isRunning = true
         commitSeq = 0; nextEmit = 0; pendingCommits.removeAll()
-        committedUpToTime = 0; lineBuffer = ""; lastTranscription = nil
-        startRecognitionTask()
-        if case .microphone = audioSource {
-            startMicrophone()
-        } else {
-            Task { await setupStream() }
-        }
-    }
-
-    /// Microphone source: feed the recognizer from the input device instead of
-    /// captured system audio (for translating people speaking in the room).
-    private func startMicrophone() {
-        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                guard granted else {
-                    self.onStatus?("Microphone access denied. Enable WindowSnap under System Settings → Privacy & Security → Microphone.")
+        lastCommittedSentence = ""
+        promptText = ""
+        audioQueue.async { self.windowSamples.removeAll() }
+        let highAccuracy = Settings.shared.translationHighAccuracy
+        onStatus?(highAccuracy
+            ? "Preparing Whisper large-v3 (higher accuracy)…"
+            : "Preparing Whisper large-v3 turbo (fast)…")
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                self.whisper = try await Self.loadSharedWhisper(highAccuracy: highAccuracy) { [weak self] pct in
+                    DispatchQueue.main.async {
+                        guard self?.isRunning == true else { return }
+                        self?.onStatus?("Downloading model… \(pct)%")
+                    }
+                }
+                await MainActor.run {
+                    guard self.isRunning else { return }
+                    self.onStatus?("Model ready — listening…")
+                    self.beginCapture()
+                    self.runTranscriptionLoop()
+                }
+            } catch {
+                await MainActor.run {
                     self.isRunning = false
-                    return
-                }
-                let engine = AVAudioEngine()
-                let input = engine.inputNode
-                let format = input.outputFormat(forBus: 0)
-                input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-                    guard let self = self, self.isRunning else { return }
-                    self.request?.append(buffer)
-                }
-                do {
-                    try engine.start()
-                    self.audioEngine = engine
-                    self.onStatus?(self.translator.isAvailable
-                                   ? "Listening to the microphone…"
-                                   : "Listening to the microphone — transcription only (translation needs macOS 15+).")
-                } catch {
-                    self.onStatus?("Couldn't start the microphone — \(error.localizedDescription)")
-                    self.isRunning = false
+                    self.onStatus?("Couldn't load the Whisper model: \(error.localizedDescription)")
                 }
             }
         }
     }
 
-    private func startRecognitionTask() {
-        let req = SFSpeechAudioBufferRecognitionRequest()
-        req.shouldReportPartialResults = true
-        req.addsPunctuation = true                       // include punctuation
-        if recognizer?.supportsOnDeviceRecognition == true { req.requiresOnDeviceRecognition = true }
-        request = req
-        // Cancelled tasks still fire their callback — often with an error AND a
-        // last "final" result repeating the utterance. Without this generation
-        // guard, that callback re-committed the same text (duplicated lines) and
-        // its error triggered another restart that killed the fresh task (gaps
-        // where nothing was listening). Stale generations are ignored entirely.
-        let gen = taskGeneration
-        task = recognizer?.recognitionTask(with: req) { [weak self] result, error in
-            guard let self = self, gen == self.taskGeneration else { return }
-            if let result = result { self.handleResult(result) }
-            // A finished/errored task is dead. Flush EVERYTHING still pending
-            // before restarting — continuous audio rarely pauses, so most tasks
-            // end in an error, and discarding the pending text here was the main
-            // source of vanished lines and "overwritten" recordings.
-            if error != nil {
-                self.flushPending(self.lastTranscription)
-                self.restartRecognition(afterPause: false)
-            }
+    /// Loads (or returns the cached) shared WhisperKit model for the current
+    /// accuracy mode, reporting download percentage. Shared by live translation
+    /// and Dictate Anywhere so the ~1.5 GB model is loaded once.
+    static func loadSharedWhisper(highAccuracy: Bool,
+                                  progress: ((Int) -> Void)? = nil) async throws -> WhisperKit {
+        if let existing = shared, loadedHighAccuracy == highAccuracy { return existing }
+        let models = (try? await WhisperKit.fetchAvailableModels()) ?? []
+        let name = preferredModelName(from: models)
+        Logger.log("Whisper loading model: \(name) (highAccuracy=\(highAccuracy))")
+        // Download (with progress) into the local cache, then load from that folder.
+        let folder = try await WhisperKit.download(variant: name) { p in
+            progress?(Int((p.fractionCompleted * 100).rounded()))
         }
+        let wk = try await WhisperKit(WhisperKitConfig(modelFolder: folder.path, load: true, download: false))
+        shared = wk
+        loadedHighAccuracy = highAccuracy
+        Logger.log("Whisper model loaded")
+        return wk
     }
 
-    /// Flows the running transcript into committed lines without ever losing or
-    /// rewriting text. Partial transcripts get REVISED retroactively by the
-    /// recognizer, so a sentence is only committed once it has been stable for a
-    /// moment — committing eagerly baked in text the recognizer later rewrote
-    /// (seen as overwritten lines) or mis-sliced it (dropped words).
-    /// Commits by AUDIO TIME instead of string matching. Every partial result
-    /// carries segments with timestamps plus their exact character ranges in the
-    /// CURRENT (revised) transcript, so slicing by range stays aligned no matter
-    /// how the recognizer rewrites earlier text — the failure mode behind every
-    /// previous round of duplicated ("overwritten") and skipped words. Audio
-    /// older than `holdback` behind the newest audio is display-final: it flows
-    /// into the sentence buffer and commits at sentence boundaries.
-    private func handleResult(_ result: SFSpeechRecognitionResult) {
-        let transcription = result.bestTranscription
-        lastTranscription = transcription
-
-        // A pause finalizes the utterance: flush it all and restart fresh so the
-        // next words (often a new speaker) begin a new line.
-        if result.isFinal {
-            flushPending(transcription)
-            restartRecognition(afterPause: true)
-            return
+    /// Picks the Whisper model to load based on the "Higher accuracy" setting.
+    /// "distil" variants are always excluded — distil-whisper is English-focused
+    /// and transcribes Thai/Chinese/etc. as garbled English.
+    ///
+    /// High accuracy on  → prefer OpenAI full `large-v3` (best for tonal/space-less
+    ///                      languages like Thai), falling back to turbo.
+    /// High accuracy off → prefer the distilled `large-v3` turbo (much faster,
+    ///                      lower latency), falling back to the full model.
+    static func preferredModelName(from models: [String]) -> String {
+        let highAccuracy = Settings.shared.translationHighAccuracy
+        func isLargeV3(_ m: String) -> Bool {
+            m.localizedCaseInsensitiveContains("large-v3")
+                && !m.localizedCaseInsensitiveContains("distil")
         }
-
-        let text = transcription.formattedString as NSString
-        let segments = transcription.segments
-        guard let newest = segments.last else { return }
-        let cutoff = newest.timestamp + newest.duration - holdback
-
-        var firstUncommittedStart = -1
-        var stableEnd = -1
-        var stableEndTime = committedUpToTime
-        for s in segments {
-            let end = s.timestamp + s.duration
-            if end <= committedUpToTime { continue }              // already flushed
-            if firstUncommittedStart < 0 { firstUncommittedStart = s.substringRange.location }
-            if end <= cutoff {
-                stableEnd = s.substringRange.location + s.substringRange.length
-                stableEndTime = end
-            }
+        let largeV3 = models.filter(isLargeV3)
+        let full  = largeV3.filter { !$0.localizedCaseInsensitiveContains("turbo") }
+        let turbo = largeV3.filter {  $0.localizedCaseInsensitiveContains("turbo") }
+        func pick(_ arr: [String]) -> String? {
+            arr.first(where: { $0.localizedCaseInsensitiveContains("openai") }) ?? arr.first
         }
-        guard firstUncommittedStart >= 0 else { return }
-
-        if stableEnd > firstUncommittedStart {
-            let stable = text.substring(with: NSRange(location: firstUncommittedStart,
-                                                      length: stableEnd - firstUncommittedStart))
-            committedUpToTime = stableEndTime
-            absorbStable(stable)
-        }
-
-        // Live line = buffered mid-sentence text + the still-revisable tail.
-        let liveFrom = max(stableEnd, firstUncommittedStart)
-        let liveTail = liveFrom < text.length ? text.substring(from: liveFrom) : ""
-        let live = (lineBuffer + liveTail).trimmingCharacters(in: .whitespacesAndNewlines)
-        DispatchQueue.main.async { self.onLiveSource?(live) }
-        throttledLiveTranslate(live)
-    }
-
-    /// Display-final text: accumulate and write it out in steady, fixed-length
-    /// lines. No punctuation is involved — the transcript just keeps flowing to
-    /// new source/translation lines as the audio stabilizes.
-    private func absorbStable(_ s: String) {
-        lineBuffer += s
-        while let line = takeLine() { commitIfFresh(line) }
-    }
-
-    /// Pulls one line's worth off the front of the buffer once it's long enough,
-    /// breaking on a space when the script uses them so words aren't split.
-    private func takeLine() -> String? {
-        // Short lines so text appears within a second or two of being spoken
-        // rather than accumulating into 5-second lumps.
-        let target = lineBuffer.contains(" ") ? 28 : 11   // latin vs CJK line length
-        let chars = Array(lineBuffer)
-        guard chars.count >= target else { return nil }
-
-        var cut = min(target, chars.count)
-        var i = min(chars.count, target + 8) - 1
-        while i >= max(0, target - 8) {
-            if chars[i] == " " { cut = i + 1; break }
-            i -= 1
-        }
-        cut = min(cut, chars.count)
-        let line = String(chars[0..<cut]).trimmingCharacters(in: .whitespaces)
-        lineBuffer = String(chars[cut...])
-        return line.isEmpty ? nil : line
-    }
-
-    /// Writes out EVERYTHING not yet committed — called on a pause (isFinal), on
-    /// task errors, and on Stop, so pending text is never discarded again.
-    private func flushPending(_ transcription: SFTranscription?) {
-        if let t = transcription {
-            let text = t.formattedString as NSString
-            var start = -1
-            for s in t.segments where s.timestamp + s.duration > committedUpToTime {
-                start = s.substringRange.location
-                break
-            }
-            if start >= 0, start < text.length { lineBuffer += text.substring(from: start) }
-        }
-        lastTranscription = nil
-        committedUpToTime = .greatestFiniteMagnitude   // nothing further from this task
-        while let line = takeLine() { commitIfFresh(line) }
-        let rest = lineBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !rest.isEmpty { commitIfFresh(rest) }
-        lineBuffer = ""
-        DispatchQueue.main.async { self.onLiveSource?(""); self.onLiveTranslation?("") }
-    }
-
-    /// Commits one line unless it's an exact repeat of the previous commit —
-    /// the last defense against a revision echoing an already-written sentence.
-    private func commitIfFresh(_ raw: String) {
-        let src = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !src.isEmpty, src != lastCommittedSentence else { return }
-        lastCommittedSentence = src
-        commitLine(src)
-    }
-
-    /// Finalizes one line: detect language (auto), translate, and emit — in
-    /// ORDER. Translations complete asynchronously and can return out of order
-    /// (a short sentence outruns a long one), which used to scramble the
-    /// transcript; each line now waits its turn.
-    private func commitLine(_ src: String) {
-        maybeDetectAndSwitch(src)
-        let seq = commitSeq; commitSeq += 1
-        translator.translate(src) { tr in
-            DispatchQueue.main.async {
-                guard seq >= self.nextEmit else { return }   // timeout already emitted it
-                self.pendingCommits[seq] = (src, tr)
-                self.emitReady()
-            }
-        }
-        // Anti-stall: one line whose translation never returns must not freeze
-        // the whole ordered transcript behind it. After 8s, emit it with the
-        // source text so the book keeps flowing.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard let self = self, seq >= self.nextEmit, self.pendingCommits[seq] == nil else { return }
-            self.pendingCommits[seq] = (src, src)
-            self.emitReady()
-        }
-    }
-
-    /// Hands finished lines to the UI strictly in sequence.
-    private func emitReady() {
-        while let (src, tr) = pendingCommits[nextEmit] {
-            pendingCommits.removeValue(forKey: nextEmit)
-            nextEmit += 1
-            onFinal?(src, tr)
-        }
-    }
-
-    /// Throttled translation of the in-progress text. Results are dropped if a
-    /// commit or task restart happened in the meantime — otherwise a slow
-    /// translation of pre-commit text would repopulate the live line with a copy
-    /// of the pair just committed above it.
-    private func throttledLiveTranslate(_ src: String) {
-        let t = src.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty, Date().timeIntervalSince(lastPartialTranslate) > 0.5 else { return }
-        lastPartialTranslate = Date()
-        // Drop the result if any commit or restart happened meanwhile —
-        // otherwise a slow partial translation resurrects after a flush and
-        // renders as a translation-only "ghost" block with no source line.
-        let markerSeq = commitSeq
-        let markerGen = taskGeneration
-        translator.translate(t) { tr in
-            DispatchQueue.main.async {
-                guard markerSeq == self.commitSeq,
-                      markerGen == self.taskGeneration else { return }
-                self.onLiveTranslation?(tr)
-            }
-        }
-    }
-
-
-    private func maybeDetectAndSwitch(_ text: String) {
-        guard autoDetect, text.count > 8 else { return }
-        let r = NLLanguageRecognizer(); r.processString(text)
-        guard let lang = r.dominantLanguage else { return }
-        let code = lang.rawValue
-        DispatchQueue.main.async {
-            self.onDetectedLanguage?(Locale.current.localizedString(forLanguageCode: code) ?? code)
-        }
-        guard code != currentLangCode, let loc = Self.speechLocale(forLanguageCode: code) else { return }
-        currentLangCode = code
-        sourceLocale = loc
-        recognizer = SFSpeechRecognizer(locale: loc)
-        // Now that we know the source, give the translator an explicit direction.
-        translator.configure(source: loc, target: targetLocale)
-    }
-
-    static func speechLocale(forLanguageCode code: String) -> Locale? {
-        SFSpeechRecognizer.supportedLocales().first { $0.language.languageCode?.identifier == code }
-    }
-
-    /// Restarts the recognition task. On a natural pause we restart immediately
-    /// (no audio is being spoken, so nothing is lost); on an error we wait a beat
-    /// to avoid a tight loop. We do NOT restart during continuous speech, which is
-    /// what previously dropped words during the gap.
-    private func restartRecognition(afterPause: Bool) {
-        taskGeneration += 1   // anything the old task still delivers is stale
-        task?.cancel(); task = nil; request = nil
-        committedUpToTime = 0   // a fresh task starts a fresh audio timeline
-        lineBuffer = ""
-        lastTranscription = nil
-        guard isRunning else { return }
-        if afterPause {
-            startRecognitionTask()
+        if highAccuracy {
+            return pick(full) ?? pick(turbo) ?? "openai_whisper-large-v3"
         } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                guard self?.isRunning == true else { return }
-                self?.startRecognitionTask()
-            }
+            return pick(turbo) ?? pick(full) ?? "openai_whisper-large-v3_turbo"
         }
+    }
+
+    func stop() {
+        isRunning = false
+        let s = stream; stream = nil
+        Task { try? await s?.stopCapture() }
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop(); audioEngine = nil
+        audioQueue.async { self.windowSamples.removeAll() }
+        onMain("Stopped.")
+    }
+
+    // MARK: Audio capture
+
+    private func beginCapture() {
+        if case .microphone = audioSource { startMicrophone() }
+        else { Task { await setupStream() } }
     }
 
     private func setupStream() async {
@@ -497,16 +310,13 @@ final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
             let config = SCStreamConfiguration()
             config.capturesAudio = true
             config.excludesCurrentProcessAudio = true
-            config.width = 2; config.height = 2
-            // Filter by source: everything, or a single app's audio only.
+            config.width = 2; config.height = 2   // native audio format; we resample to 16 kHz mono
             let filter: SCContentFilter
             let sourceDesc: String
             switch audioSource {
             case .app(let pid, let name):
                 guard let scApp = content.applications.first(where: { $0.processID == pid }) else {
-                    onMain("\(name) isn't available to capture — is it still running?")
-                    isRunning = false
-                    return
+                    onMain("\(name) isn't available to capture — is it still running?"); isRunning = false; return
                 }
                 filter = SCContentFilter(display: display, including: [scApp], exceptingWindows: [])
                 sourceDesc = "\(name) audio"
@@ -518,33 +328,233 @@ final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
             try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
             try await s.startCapture()
             stream = s
-            onMain(translator.isAvailable
-                   ? (autoDetect ? "Listening to \(sourceDesc) — detecting language…" : "Listening to \(sourceDesc)…")
-                   : "Listening to \(sourceDesc) — transcription only (translation needs macOS 15+).")
+            onMain("Listening to \(sourceDesc)…")
         } catch {
             onMain("Couldn't start audio capture (Screen Recording permission?). \(error.localizedDescription)")
             isRunning = false
         }
     }
 
-    func stop() {
-        isRunning = false
-        flushPending(lastTranscription)   // write the tail before tearing down
-        taskGeneration += 1
-        let s = stream; stream = nil
-        Task { try? await s?.stopCapture() }
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        audioEngine = nil
-        request?.endAudio(); task?.cancel(); task = nil; request = nil
-        committedUpToTime = 0
-        lastCommittedSentence = ""
-        onMain("Stopped.")
+    private func startMicrophone() {
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                guard granted else {
+                    self.onStatus?("Microphone access denied. Enable WindowSnap under System Settings → Privacy & Security → Microphone.")
+                    self.isRunning = false; return
+                }
+                let engine = AVAudioEngine()
+                let input = engine.inputNode
+                let format = input.outputFormat(forBus: 0)
+                input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+                    guard let self = self, self.isRunning else { return }
+                    guard let resampled = AudioProcessor.resampleAudio(fromBuffer: buffer,
+                                                                       toSampleRate: 16000, channelCount: 1) else { return }
+                    let floats = AudioProcessor.convertBufferToArray(buffer: resampled)
+                    self.audioQueue.async { self.windowSamples.append(contentsOf: floats) }
+                }
+                do {
+                    try engine.start(); self.audioEngine = engine
+                    self.onStatus?("Listening to the microphone…")
+                } catch {
+                    self.onStatus?("Couldn't start the microphone — \(error.localizedDescription)"); self.isRunning = false
+                }
+            }
+        }
     }
 
+    private var loggedFormat = false
+
+    // SCStreamOutput — runs on audioQueue (our sampleHandlerQueue). Convert
+    // whatever format SCK delivers into 16 kHz mono via AVAudioConverter rather
+    // than assuming the bytes are already 16 kHz mono float (which gave Whisper
+    // garbled audio → English hallucinations).
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio, isRunning else { return }
-        request?.appendAudioSampleBuffer(sampleBuffer)
+        guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
+        let inFormat = AVAudioFormat(cmAudioFormatDescription: formatDesc)
+        let frames = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frames > 0, let inBuf = AVAudioPCMBuffer(pcmFormat: inFormat, frameCapacity: frames) else { return }
+        inBuf.frameLength = frames
+        guard CMSampleBufferCopyPCMDataIntoAudioBufferList(
+                sampleBuffer, at: 0, frameCount: Int32(frames), into: inBuf.mutableAudioBufferList) == noErr
+        else { return }
+
+        if !loggedFormat {
+            loggedFormat = true
+            Logger.log("Whisper audio in: \(Int(inFormat.sampleRate))Hz \(inFormat.channelCount)ch")
+        }
+        guard let out = AudioProcessor.resampleAudio(fromBuffer: inBuf, toSampleRate: 16000, channelCount: 1) else { return }
+        let floats = AudioProcessor.convertBufferToArray(buffer: out)
+        if !floats.isEmpty { windowSamples.append(contentsOf: floats) }
+    }
+
+    // MARK: Transcription loop
+
+    private func runTranscriptionLoop() {
+        Task { [weak self] in
+            while let self = self, self.isRunning {
+                await self.transcribeStep()
+                try? await Task.sleep(nanoseconds: 100_000_000)   // transcribe as fast as the model allows
+            }
+        }
+    }
+
+    private func transcribeStep() async {
+        guard let whisper = whisper, !transcribing else { return }
+        let samples: [Float] = audioQueue.sync { windowSamples }
+        guard samples.count >= minTranscribeSamples else { return }   // need enough context
+        transcribing = true
+        defer { transcribing = false }
+        let rms = (samples.map { $0 * $0 }.reduce(0, +) / Float(samples.count)).squareRoot()
+        // Silence gate: when the whole window is essentially quiet, skip the decode.
+        // Whisper otherwise hallucinates text (or parrots the prompt) on silence.
+        // Trim the buffer so a long silent stretch can't grow it without bound.
+        guard rms >= silenceRMS else {
+            audioQueue.async {
+                if self.windowSamples.count > self.minTranscribeSamples {
+                    self.windowSamples.removeFirst(self.windowSamples.count - self.minTranscribeSamples)
+                }
+            }
+            return
+        }
+        // Robust decoding tuned for accuracy on hard languages like Thai:
+        //  • usePrefillPrompt + explicit language pin the correct language tokens
+        //    (auto-detect only when the user picked "Automatic"), so Thai audio
+        //    isn't mis-decoded as romanized/English.
+        //  • temperature fallback retries a collapsed decode instead of emitting
+        //    a repetition loop.
+        //  • compression-ratio / log-prob / no-speech thresholds drop hallucinated
+        //    or low-confidence output rather than committing garbage.
+        //  • promptTokens condition the decode on recently committed text so the
+        //    model keeps context across the rolling windows. WhisperKit trims these
+        //    to its max prompt length and strips special tokens itself.
+        var options = DecodingOptions(
+            task: .transcribe,
+            language: whisperLang,
+            temperature: 0.0,
+            temperatureFallbackCount: 5,
+            usePrefillPrompt: true,
+            detectLanguage: whisperLang == nil,
+            skipSpecialTokens: true,
+            compressionRatioThreshold: 2.4,
+            logProbThreshold: -1.0,
+            noSpeechThreshold: 0.6
+        )
+        if !promptText.isEmpty, let toks = whisper.tokenizer?.encode(text: " " + promptText), !toks.isEmpty {
+            options.promptTokens = toks
+        }
+        guard let results = try? await whisper.transcribe(audioArray: samples, decodeOptions: options),
+              let result = results.first else { return }
+        Logger.log(String(format: "Whisper lang=%@ set=%@ rms=%.3f: %@",
+                          result.language, whisperLang ?? "auto", rms,
+                          String(result.segments.map { $0.text }.joined().prefix(40))))
+        await MainActor.run { self.handleWhisper(result, windowCount: samples.count) }
+    }
+
+    /// Confirms Whisper segments whose audio ended more than `holdback` before the
+    /// window's newest audio (older segments are stable), commits them as lines,
+    /// drops their audio from the window, and shows the rest as the live line.
+    private func handleWhisper(_ result: TranscriptionResult, windowCount: Int) {
+        guard isRunning else { return }
+        if autoDetect, !result.language.isEmpty {
+            onDetectedLanguage?(Locale.current.localizedString(forLanguageCode: result.language) ?? result.language)
+        }
+        let windowDur = Float(windowCount) / 16000
+        let cutoff = windowDur - holdback
+        var confirmedEnd: Float = 0
+        var live = ""
+        for seg in result.segments {
+            if seg.end <= cutoff {
+                let t = Self.cleanSegment(seg.text)
+                if !t.isEmpty { commitIfFresh(t) }
+                confirmedEnd = seg.end
+            } else {
+                live += seg.text
+            }
+        }
+        // Window very long with nothing confirmable: force-confirm all but the last.
+        if confirmedEnd == 0, windowDur > 12, result.segments.count > 1 {
+            for seg in result.segments.dropLast() {
+                let t = Self.cleanSegment(seg.text)
+                if !t.isEmpty { commitIfFresh(t) }
+                confirmedEnd = seg.end
+            }
+            live = result.segments.last?.text ?? ""
+        }
+        if confirmedEnd > 0 {
+            let drop = Int(confirmedEnd * 16000)
+            audioQueue.async {
+                if drop < self.windowSamples.count { self.windowSamples.removeFirst(drop) }
+                else { self.windowSamples.removeAll() }
+            }
+        }
+        let liveTrim = Self.cleanSegment(live)
+        onLiveSource?(liveTrim)
+        throttledLiveTranslate(liveTrim)
+    }
+
+    /// Strips Whisper's non-speech markers so music/applause/etc. aren't shown or
+    /// translated: musical-note glyphs and bracketed cues like "[Music]",
+    /// "(applause)", "[BLANK_AUDIO]". Real words (including the Thai word for
+    /// "song") are left untouched — only these markers are removed.
+    private static let nonSpeechRegex = try! NSRegularExpression(
+        pattern: "[\\[(【]\\s*(music|applause|laughter|blank[ _]?audio|silence|no speech|noise|sound|inaudible|foreign|speaking foreign language)\\s*[\\])】]",
+        options: [.caseInsensitive])
+    static func cleanSegment(_ s: String) -> String {
+        var t = s.replacingOccurrences(of: "♪", with: "")
+                 .replacingOccurrences(of: "♫", with: "")
+        let range = NSRange(t.startIndex..., in: t)
+        t = nonSpeechRegex.stringByReplacingMatches(in: t, options: [], range: range, withTemplate: "")
+        return t.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: Commit + translate (ordered)
+
+    private func commitIfFresh(_ raw: String) {
+        let src = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !src.isEmpty, src != lastCommittedSentence else { return }
+        lastCommittedSentence = src
+        // Grow the conditioning prompt with this line, keeping only the recent tail.
+        promptText = String((promptText + " " + src).suffix(promptCharLimit))
+        commitLine(src)
+    }
+
+    private func commitLine(_ src: String) {
+        let seq = commitSeq; commitSeq += 1
+        translator.translate(src) { tr in
+            DispatchQueue.main.async {
+                guard seq >= self.nextEmit else { return }
+                self.pendingCommits[seq] = (src, tr)
+                self.emitReady()
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self = self, seq >= self.nextEmit, self.pendingCommits[seq] == nil else { return }
+            self.pendingCommits[seq] = (src, src)
+            self.emitReady()
+        }
+    }
+
+    private func emitReady() {
+        while let (src, tr) = pendingCommits[nextEmit] {
+            pendingCommits.removeValue(forKey: nextEmit)
+            nextEmit += 1
+            onFinal?(src, tr)
+        }
+    }
+
+    private func throttledLiveTranslate(_ src: String) {
+        let t = src.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, Date().timeIntervalSince(lastPartialTranslate) > 0.5 else { return }
+        lastPartialTranslate = Date()
+        let markerSeq = commitSeq
+        translator.translate(t) { tr in
+            DispatchQueue.main.async {
+                guard markerSeq == self.commitSeq else { return }
+                self.onLiveTranslation?(tr)
+            }
+        }
     }
 
     private func onMain(_ s: String) { DispatchQueue.main.async { self.onStatus?(s) } }
@@ -553,17 +563,17 @@ final class LiveTranslator: NSObject, SCStreamDelegate, SCStreamOutput {
 // MARK: - Translation tab
 
 @available(macOS 13.0, *)
-final class TranslationPane: NSView, NSMenuDelegate {
+final class TranslationPane: NSView {
     private let engine = LiveTranslator()
-    private let audioPopup = NSPopUpButton()
     private let sourcePopup = NSPopUpButton()
     private let targetPopup = NSPopUpButton()
+    private let audioPopup = NSPopUpButton()
     private let startButton = NSButton()
-    private let statusLabel = NSTextField(labelWithString: "Choose languages and press Start.")
+    private let accuracyToggle = NSButton()
+    private let statusLabel = NSTextField(labelWithString: "")
     private let detectedLabel = NSTextField(labelWithString: "")
     private let outputView = NSTextView()
 
-    private var sourceLocales: [Locale] = []
     private var running = false
     private var committedLength = 0
     private var liveSourceText = ""
@@ -571,42 +581,90 @@ final class TranslationPane: NSView, NSMenuDelegate {
 
     private static let targets: [(String, String)] = [
         ("English", "en"), ("Spanish", "es"), ("French", "fr"), ("German", "de"),
-        ("Italian", "it"), ("Portuguese", "pt"), ("Chinese (Simplified)", "zh"),
+        ("Italian", "it"), ("Portuguese", "pt"), ("Chinese", "zh"),
         ("Japanese", "ja"), ("Korean", "ko"), ("Russian", "ru"), ("Arabic", "ar"),
         ("Hindi", "hi"), ("Dutch", "nl"), ("Polish", "pl"), ("Turkish", "tr"),
     ]
+
+    /// Priority source languages floated to the top of the "From" list (in this
+    /// order) ahead of the alphabetical rest. Matched by Whisper language *code*,
+    /// so any code the loaded model doesn't support is simply skipped, and each
+    /// item's display name comes from Whisper's own list.
+    private static let pinnedSourceLanguageCodes = ["id", "ms", "th", "vi", "tl", "zh", "yue"]
 
     override init(frame frameRect: NSRect) { super.init(frame: frameRect); build(); wireEngine() }
     required init?(coder: NSCoder) { fatalError() }
 
     private func build() {
-        sourcePopup.addItem(withTitle: "Automatic (detect)")
-        sourceLocales = SFSpeechRecognizer.supportedLocales().sorted {
-            (Locale.current.localizedString(forIdentifier: $0.identifier) ?? $0.identifier)
-                < (Locale.current.localizedString(forIdentifier: $1.identifier) ?? $1.identifier)
+        // Source languages come from Whisper's own list so the code we pass is
+        // always a valid language token — otherwise WhisperKit silently falls
+        // back to English (that was the "wrong source language" bug).
+        //
+        // Each item carries its Whisper code in representedObject, so the ASEAN
+        // group can be floated to the top (with a separator) without the
+        // selection logic depending on item order.
+        sourcePopup.addItem(withTitle: "Automatic (detect)")   // representedObject nil = auto-detect
+
+        // Sort first so the code→name dedupe below picks a stable, alphabetically
+        // first display name when Whisper lists aliases for one code (e.g.
+        // chinese/mandarin → "zh", flemish/dutch → "nl").
+        let all = Constants.languages
+            .map { (name: $0.key.capitalized, code: $0.value) }
+            .sorted { $0.name < $1.name }
+        let byCode = Dictionary(all.map { ($0.code, $0) }, uniquingKeysWith: { first, _ in first })
+        let pinned = Self.pinnedSourceLanguageCodes.compactMap { byCode[$0] }
+        let pinnedCodes = Set(Self.pinnedSourceLanguageCodes)
+        let rest = all.filter { !pinnedCodes.contains($0.code) }
+
+        func addLang(_ lang: (name: String, code: String)) {
+            sourcePopup.addItem(withTitle: lang.name)
+            sourcePopup.lastItem?.representedObject = lang.code
         }
-        for loc in sourceLocales {
-            sourcePopup.addItem(withTitle: Locale.current.localizedString(forIdentifier: loc.identifier) ?? loc.identifier)
+        pinned.forEach(addLang)
+        if !pinned.isEmpty, !rest.isEmpty { sourcePopup.menu?.addItem(.separator()) }
+        rest.forEach(addLang)
+        sourcePopup.target = self; sourcePopup.action = #selector(languageChanged)
+        // Restore the last-used source language ("" = Automatic).
+        Self.selectByCode(sourcePopup, code: Settings.shared.translationSourceCode)
+
+        for (name, code) in Self.targets {
+            targetPopup.addItem(withTitle: name)
+            targetPopup.lastItem?.representedObject = code
         }
-        sourcePopup.selectItem(at: 0)
-        for (name, _) in Self.targets { targetPopup.addItem(withTitle: name) }
-        targetPopup.selectItem(at: 0)
+        targetPopup.target = self; targetPopup.action = #selector(languageChanged)
+        // Restore the last-used target language (default English).
+        Self.selectByCode(targetPopup, code: Settings.shared.translationTargetCode)
+
+        // Audio source: System / Microphone, then each running app.
+        populateAudioSources()
+        audioPopup.target = self; audioPopup.action = #selector(audioChanged)
 
         startButton.title = "Start"; startButton.bezelStyle = .rounded
         startButton.target = self; startButton.action = #selector(toggleRun)
         let clearButton = NSButton(title: "Clear", target: self, action: #selector(clearOutput))
         clearButton.bezelStyle = .rounded
 
-        rebuildAudioMenu()
-        audioPopup.translatesAutoresizingMaskIntoConstraints = false
-        audioPopup.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        // "Higher accuracy" switches to the full large-v3 model. It's slower, so
+        // it lives on its own row and applies on the next Start.
+        accuracyToggle.setButtonType(.switch)
+        accuracyToggle.title = "Higher accuracy"
+        accuracyToggle.state = Settings.shared.translationHighAccuracy ? .on : .off
+        accuracyToggle.target = self
+        accuracyToggle.action = #selector(toggleAccuracy)
+        accuracyToggle.toolTip = "Use the full Whisper large-v3 model for better transcription "
+            + "accuracy. Slower to transcribe; takes effect on the next Start."
+        accuracyToggle.translatesAutoresizingMaskIntoConstraints = false
 
-        let controls = NSStackView(views: [NSTextField(labelWithString: "Audio:"), audioPopup,
-                                           NSTextField(labelWithString: "From:"), sourcePopup,
+        let controls = NSStackView(views: [NSTextField(labelWithString: "From:"), sourcePopup,
                                            NSTextField(labelWithString: "To:"), targetPopup,
                                            startButton, clearButton])
         controls.orientation = .horizontal; controls.spacing = 8
         controls.translatesAutoresizingMaskIntoConstraints = false
+
+        // Second row: audio source picker + the accuracy toggle.
+        let row2 = NSStackView(views: [NSTextField(labelWithString: "Audio:"), audioPopup, accuracyToggle])
+        row2.orientation = .horizontal; row2.spacing = 8
+        row2.translatesAutoresizingMaskIntoConstraints = false
 
         statusLabel.font = .systemFont(ofSize: 11); statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail; statusLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -619,12 +677,16 @@ final class TranslationPane: NSView, NSMenuDelegate {
         scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
-        addSubview(controls); addSubview(statusLabel); addSubview(detectedLabel); addSubview(scroll)
+        addSubview(controls); addSubview(row2)
+        addSubview(statusLabel); addSubview(detectedLabel); addSubview(scroll)
         NSLayoutConstraint.activate([
             controls.topAnchor.constraint(equalTo: topAnchor, constant: 14),
             controls.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             controls.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
-            statusLabel.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 8),
+            row2.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 8),
+            row2.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            row2.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
+            statusLabel.topAnchor.constraint(equalTo: row2.bottomAnchor, constant: 8),
             statusLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             detectedLabel.centerYAnchor.constraint(equalTo: statusLabel.centerYAnchor),
             detectedLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
@@ -634,53 +696,6 @@ final class TranslationPane: NSView, NSMenuDelegate {
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
         ])
-    }
-
-    /// Rebuilds the audio-source menu: System Audio, Microphone, then every
-    /// running app so one app's audio (Teams, Zoom, Chrome…) can be isolated.
-    /// Refreshed each time the menu opens so the app list is current.
-    private func rebuildAudioMenu() {
-        let selected = audioPopup.selectedItem?.representedObject
-        let menu = audioPopup.menu ?? NSMenu()
-        menu.removeAllItems()
-        func add(_ title: String, _ rep: Any?) {
-            let it = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            it.representedObject = rep
-            menu.addItem(it)
-        }
-        add("System Audio", "system")
-        add("Microphone", "mic")
-        menu.addItem(.separator())
-        let selfPid = ProcessInfo.processInfo.processIdentifier
-        let apps = NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular && $0.processIdentifier != selfPid }
-            .compactMap { a in a.localizedName.map { ($0, Int(a.processIdentifier)) } }
-            .sorted { $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending }
-        for (name, pid) in apps { add(name, pid) }
-        if audioPopup.menu == nil { audioPopup.menu = menu }
-        menu.delegate = self
-        // Restore the previous selection (an app may have quit; fall back to System).
-        let idx = menu.items.firstIndex {
-            if let a = selected as? String, let b = $0.representedObject as? String { return a == b }
-            if let a = selected as? Int, let b = $0.representedObject as? Int { return a == b }
-            return false
-        }
-        audioPopup.selectItem(at: idx ?? 0)
-    }
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        guard menu == audioPopup.menu else { return }
-        rebuildAudioMenu()
-    }
-
-    /// The engine AudioSource for the current dropdown selection.
-    private func selectedAudioSource() -> AudioSource {
-        let item = audioPopup.selectedItem
-        if let s = item?.representedObject as? String, s == "mic" { return .microphone }
-        if let pid = item?.representedObject as? Int, let name = item?.title {
-            return .app(pid: pid_t(pid), name: name)
-        }
-        return .system
     }
 
     private func wireEngine() {
@@ -739,17 +754,97 @@ final class TranslationPane: NSView, NSMenuDelegate {
         liveSourceText = ""; liveTransText = ""; detectedLabel.stringValue = ""
     }
 
+    /// Persist the accuracy choice. It changes which model loads, so it only
+    /// takes effect on the next Start (the engine reloads if the mode changed).
+    @objc private func toggleAccuracy(_ sender: NSButton) {
+        Settings.shared.translationHighAccuracy = (sender.state == .on)
+        Settings.shared.save()
+        statusLabel.stringValue = sender.state == .on
+            ? "Higher accuracy on — full large-v3 loads on the next Start (slower)."
+            : "Higher accuracy off — fast large-v3 turbo loads on the next Start."
+    }
+
+    /// Persist the last-used From/To languages so they're restored next launch.
+    @objc private func languageChanged() {
+        Settings.shared.translationSourceCode = (sourcePopup.selectedItem?.representedObject as? String) ?? ""
+        Settings.shared.translationTargetCode = (targetPopup.selectedItem?.representedObject as? String) ?? "en"
+        Settings.shared.save()
+    }
+
+    /// Persist System/Microphone choices. Per-app picks aren't persisted because
+    /// a pid isn't stable across launches.
+    @objc private func audioChanged() {
+        if let s = audioPopup.selectedItem?.representedObject as? String {
+            Settings.shared.translationAudioSource = s
+            Settings.shared.save()
+        }
+    }
+
+    /// Select the popup item whose representedObject code matches, else the first.
+    private static func selectByCode(_ popup: NSPopUpButton, code: String) {
+        if !code.isEmpty {
+            for item in popup.itemArray where (item.representedObject as? String) == code {
+                popup.select(item); return
+            }
+        }
+        popup.selectItem(at: 0)
+    }
+
+    /// Fill the audio popup: System, Microphone, then each running regular app
+    /// (its pid stored in representedObject). Rebuilt each time the tab is built
+    /// so the app list is current.
+    private func populateAudioSources() {
+        audioPopup.removeAllItems()
+        audioPopup.addItem(withTitle: "System audio")
+        audioPopup.lastItem?.representedObject = "system"
+        audioPopup.addItem(withTitle: "Microphone")
+        audioPopup.lastItem?.representedObject = "mic"
+
+        let me = ProcessInfo.processInfo.processIdentifier
+        let apps = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && $0.processIdentifier != me
+                      && ($0.localizedName?.isEmpty == false) }
+            .sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
+        if !apps.isEmpty { audioPopup.menu?.addItem(.separator()) }
+        for app in apps {
+            audioPopup.addItem(withTitle: app.localizedName ?? "App")
+            audioPopup.lastItem?.representedObject = Int(app.processIdentifier)
+        }
+        // Restore System/Mic; app selections aren't persisted (pid changes).
+        Self.selectByCode(audioPopup, code: Settings.shared.translationAudioSource)
+    }
+
+    /// Read the audio-source selection into the engine.
+    private func applyAudioSelection() {
+        guard let ro = audioPopup.selectedItem?.representedObject else {
+            engine.setAudioSource(.system); return
+        }
+        if let s = ro as? String {
+            engine.setAudioSource(s == "mic" ? .microphone : .system)
+        } else if let pidInt = ro as? Int {
+            engine.setAudioSource(.app(pid: pid_t(pidInt), name: audioPopup.titleOfSelectedItem ?? "App"))
+        } else {
+            engine.setAudioSource(.system)
+        }
+    }
+
+    private func setControlsEnabled(_ on: Bool) {
+        sourcePopup.isEnabled = on; targetPopup.isEnabled = on
+        audioPopup.isEnabled = on; accuracyToggle.isEnabled = on
+    }
+
     @objc private func toggleRun() {
         if running {
             engine.stop(); running = false; startButton.title = "Start"
-            sourcePopup.isEnabled = true; targetPopup.isEnabled = true; audioPopup.isEnabled = true
+            setControlsEnabled(true)
             return
         }
-        let sel = sourcePopup.indexOfSelectedItem
-        let source: Locale? = sel <= 0 ? nil : sourceLocales[sel - 1]
-        let target = Locale(identifier: Self.targets[max(0, targetPopup.indexOfSelectedItem)].1)
-        engine.setLanguages(source: source, target: target)
-        engine.setAudioSource(selectedAudioSource())
+        // nil representedObject = the "Automatic (detect)" row.
+        let sourceCode = sourcePopup.selectedItem?.representedObject as? String
+        let targetCode = targetPopup.selectedItem?.representedObject as? String ?? "en"
+        let target = Locale(identifier: targetCode)
+        engine.setLanguages(sourceCode: sourceCode, target: target)
+        applyAudioSelection()
         if let host = engine.translator.hostingView, host.superview == nil {
             host.frame = NSRect(x: 0, y: 0, width: 1, height: 1)
             addSubview(host)
@@ -757,13 +852,14 @@ final class TranslationPane: NSView, NSMenuDelegate {
         detectedLabel.stringValue = ""
         engine.start()
         running = true; startButton.title = "Stop"
-        sourcePopup.isEnabled = false; targetPopup.isEnabled = false; audioPopup.isEnabled = false
+        // Locked while running — languages, audio source, and model are set at Start.
+        setControlsEnabled(false)
     }
 
     func stopIfRunning() {
         if running {
             engine.stop(); running = false; startButton.title = "Start"
-            sourcePopup.isEnabled = true; targetPopup.isEnabled = true; audioPopup.isEnabled = true
+            setControlsEnabled(true)
         }
     }
 }

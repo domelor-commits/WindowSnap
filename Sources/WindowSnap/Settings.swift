@@ -34,6 +34,9 @@ final class Settings {
     var snapFlashEnabled: Bool = true       // flash the target region on keyboard snap
     var clipboardHistoryEnabled: Bool = true
     var clipboardAutoPaste: Bool = true     // paste the chosen clip into the frontmost app
+    // Persist clipboard text to disk (survives relaunches). Off = keep history in
+    // memory for the session only, so nothing sensitive is written to disk.
+    var clipboardPersistToDisk: Bool = true
     var playFeedbackSound: Bool = false
     var restoreLayoutMatchByTitle: Bool = true   // else match purely by order
     var overwriteOnStandby: Bool = true          // auto-overwrite Default at sleep (on by default)
@@ -41,6 +44,26 @@ final class Settings {
     var standbyLayoutID: String = ""             // which layout to overwrite at sleep
     var restoreOnWake: Bool = true               // auto-restore Default on wake (on by default)
     var wakeLayoutID: String = ""                // which layout to restore on wake
+
+    // Translation: use the full Whisper large-v3 model (more accurate, slower)
+    // instead of the distilled large-v3 "turbo" (faster, lower accuracy). Off by
+    // default so live transcription stays responsive; turn on for hard languages
+    // (Thai, Lao, Khmer, Burmese) when the extra latency is acceptable.
+    var translationHighAccuracy: Bool = false
+    // Last-used translation choices, restored on next launch.
+    var translationSourceCode: String = ""       // Whisper code; "" = Automatic (detect)
+    var translationTargetCode: String = "en"     // target language code
+    var translationAudioSource: String = "system"  // "system" or "mic" (per-app isn't persisted)
+    // Dictate Anywhere: Whisper language code for dictation ("" = auto-detect).
+    var dictationLanguage: String = ""
+    // Show the next calendar meeting (with a Join link) in the menu-bar menu.
+    var meetingBarEnabled: Bool = false
+    // Keystroke visualizer overlay (KeyCastr-style) on/off, restored on launch.
+    var keystrokeVizEnabled: Bool = false
+    // Conversion tab: currencies pinned to the top (in order) and ones hidden.
+    var currencyFavorites: [String] = []
+    var currencyHidden: [String] = []
+    var currencyDecimals: Int = 4                // decimal places shown for currency values
 
     // Configurable shortcuts keyed by SnapRegion.rawValue plus "overwriteLayout"
     var shortcuts: [String: Shortcut] = Settings.defaults()
@@ -85,10 +108,14 @@ final class Settings {
         SystemTask(id: "allInOne",             title: "All-in-One Capture Menu"),
         SystemTask(id: "toggleDesktopIcons",   title: "Show/Hide Desktop Icons"),
         SystemTask(id: "ocrArea",              title: "Copy Text from Screen (OCR)"),
+        SystemTask(id: "dictate",              title: "Dictate Anywhere (voice to text)"),
+        SystemTask(id: "windowSwitcher",       title: "Window Switcher"),
+        SystemTask(id: "keystrokeViz",         title: "Keystroke Visualizer (toggle)"),
         SystemTask(id: "clipboardHistory",     title: "Clipboard History"),
         SystemTask(id: "keepAwakeToggle",      title: "Keep Awake (toggle)"),
         SystemTask(id: "forceQuit",            title: "Force Quit App…"),
         SystemTask(id: "commandPalette",       title: "Command Palette"),
+        SystemTask(id: "cheatSheet",           title: "Keyboard Shortcuts Cheat Sheet"),
         SystemTask(id: "shelf",                title: "Drag & Drop Shelf"),
         SystemTask(id: "pasteAsPlainText",      title: "Paste as Plain Text"),
         SystemTask(id: "lockScreen",           title: "Lock Screen"),
@@ -142,6 +169,7 @@ final class Settings {
         var snapFlashEnabled: Bool?
         var clipboardHistoryEnabled: Bool?
         var clipboardAutoPaste: Bool?
+        var clipboardPersistToDisk: Bool?
         var playFeedbackSound: Bool
         var restoreLayoutMatchByTitle: Bool
         var overwriteOnStandby: Bool?      // optional for backward compatibility
@@ -149,6 +177,16 @@ final class Settings {
         var standbyLayoutID: String?
         var restoreOnWake: Bool?
         var wakeLayoutID: String?
+        var translationHighAccuracy: Bool?   // optional for backward compatibility
+        var translationSourceCode: String?
+        var translationTargetCode: String?
+        var translationAudioSource: String?
+        var dictationLanguage: String?
+        var meetingBarEnabled: Bool?
+        var keystrokeVizEnabled: Bool?
+        var currencyFavorites: [String]?
+        var currencyHidden: [String]?
+        var currencyDecimals: Int?
         var shortcuts: [String: Shortcut]
         var functionKeyApps: [String: String]?
         var overlayShowMagnifier: Bool?
@@ -166,13 +204,24 @@ final class Settings {
                             snapFlashEnabled: snapFlashEnabled,
                             clipboardHistoryEnabled: clipboardHistoryEnabled,
                             clipboardAutoPaste: clipboardAutoPaste,
+                            clipboardPersistToDisk: clipboardPersistToDisk,
                             playFeedbackSound: playFeedbackSound,
                             restoreLayoutMatchByTitle: restoreLayoutMatchByTitle,
                             overwriteOnStandby: overwriteOnStandby,
                             overwriteOnLock: overwriteOnLock,
                             standbyLayoutID: standbyLayoutID,
                             restoreOnWake: restoreOnWake,
-                            wakeLayoutID: wakeLayoutID, shortcuts: shortcuts,
+                            wakeLayoutID: wakeLayoutID,
+                            translationHighAccuracy: translationHighAccuracy,
+                            translationSourceCode: translationSourceCode,
+                            translationTargetCode: translationTargetCode,
+                            translationAudioSource: translationAudioSource,
+                            dictationLanguage: dictationLanguage,
+                            meetingBarEnabled: meetingBarEnabled,
+                            keystrokeVizEnabled: keystrokeVizEnabled,
+                            currencyFavorites: currencyFavorites,
+                            currencyHidden: currencyHidden,
+                            currencyDecimals: currencyDecimals, shortcuts: shortcuts,
                             functionKeyApps: functionKeyApps,
                             overlayShowMagnifier: overlayShowMagnifier,
                             overlayAutoCloseSeconds: overlayAutoCloseSeconds,
@@ -196,6 +245,7 @@ final class Settings {
         snapFlashEnabled = snap.snapFlashEnabled ?? true
         clipboardHistoryEnabled = snap.clipboardHistoryEnabled ?? true
         clipboardAutoPaste = snap.clipboardAutoPaste ?? true
+        clipboardPersistToDisk = snap.clipboardPersistToDisk ?? true
         playFeedbackSound = snap.playFeedbackSound
         restoreLayoutMatchByTitle = snap.restoreLayoutMatchByTitle
         overwriteOnStandby = snap.overwriteOnStandby ?? true
@@ -203,6 +253,16 @@ final class Settings {
         standbyLayoutID = snap.standbyLayoutID ?? ""
         restoreOnWake = snap.restoreOnWake ?? true
         wakeLayoutID = snap.wakeLayoutID ?? ""
+        translationHighAccuracy = snap.translationHighAccuracy ?? false
+        translationSourceCode = snap.translationSourceCode ?? ""
+        translationTargetCode = snap.translationTargetCode ?? "en"
+        translationAudioSource = snap.translationAudioSource ?? "system"
+        dictationLanguage = snap.dictationLanguage ?? ""
+        meetingBarEnabled = snap.meetingBarEnabled ?? false
+        keystrokeVizEnabled = snap.keystrokeVizEnabled ?? false
+        currencyFavorites = snap.currencyFavorites ?? []
+        currencyHidden = snap.currencyHidden ?? []
+        currencyDecimals = snap.currencyDecimals ?? 4
         // Merge so new regions added in updates still get defaults
         var merged = Settings.defaults()
         for (k, v) in snap.shortcuts { merged[k] = v }

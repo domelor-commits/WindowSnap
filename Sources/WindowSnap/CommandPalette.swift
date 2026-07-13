@@ -26,6 +26,7 @@ final class CommandPalette: NSObject, NSTableViewDataSource, NSTableViewDelegate
         frontApp = NSWorkspace.shared.frontmostApplication   // so snaps target the right window
         all = actions
         filtered = actions
+        CurrencyRates.prefetch()   // warm currency rates for "100 usd to sgd"
         build()
     }
 
@@ -88,12 +89,22 @@ final class CommandPalette: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     private func applyFilter(_ q: String) {
+        var results: [PaletteAction] = []
+        // Calculator: arithmetic / unit / currency result as a copyable top row.
+        if let answer = Calculator.evaluate(q) {
+            results.append(PaletteAction(title: "= \(answer)", subtitle: "Copy result") {
+                let pb = NSPasteboard.general
+                pb.clearContents(); pb.setString(answer, forType: .string)
+            })
+        }
+        let matches: [PaletteAction]
         if q.isEmpty {
-            filtered = all
+            matches = all
         } else {
             let ql = q.lowercased()
-            filtered = all.filter { $0.title.lowercased().contains(ql) || $0.subtitle.lowercased().contains(ql) }
+            matches = all.filter { $0.title.lowercased().contains(ql) || $0.subtitle.lowercased().contains(ql) }
         }
+        filtered = results + matches
         table?.reloadData()
         if !filtered.isEmpty { table.selectRowIndexes([0], byExtendingSelection: false) }
     }

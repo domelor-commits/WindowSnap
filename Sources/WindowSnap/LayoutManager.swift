@@ -231,15 +231,19 @@ enum LayoutManager {
     }
 
     /// Which display (by NSScreen frame) contains the center of an AX-origin frame.
+    /// Returns "" when there are no screens (all displays asleep/disconnected),
+    /// which callers treat as "unknown display".
     static func displayID(forAXFrame axFrame: CGRect) -> String {
-        let primaryHeight = NSScreen.screens.first!.frame.maxY
+        func signature(_ f: CGRect) -> String {
+            "\(Int(f.minX)),\(Int(f.minY)),\(Int(f.width)),\(Int(f.height))"
+        }
+        guard let primaryHeight = NSScreen.screens.first?.frame.maxY else { return "" }
         let center = CGPoint(x: axFrame.midX, y: primaryHeight - axFrame.midY)
         for screen in NSScreen.screens where screen.frame.contains(center) {
-            let f = screen.frame
-            return "\(Int(f.minX)),\(Int(f.minY)),\(Int(f.width)),\(Int(f.height))"
+            return signature(screen.frame)
         }
-        let f = NSScreen.main!.frame
-        return "\(Int(f.minX)),\(Int(f.minY)),\(Int(f.width)),\(Int(f.height))"
+        guard let main = NSScreen.main else { return "" }
+        return signature(main.frame)
     }
 
     static func loadAll() -> [Layout] {

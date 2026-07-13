@@ -15,7 +15,7 @@ final class ClipboardHistory {
     static let shared = ClipboardHistory()
 
     private(set) var entries: [ClipEntry] = []
-    private let maxEntries = 50
+    private let maxEntries = 20
     private var timer: Timer?
     private var lastChange = NSPasteboard.general.changeCount
 
@@ -43,6 +43,10 @@ final class ClipboardHistory {
         persist()
         NotificationCenter.default.post(name: .windowSnapClipboardChanged, object: nil)
     }
+
+    /// Apply the current "persist to disk" setting: writes the in-memory history
+    /// when on, or deletes the on-disk store when off. Call after the toggle flips.
+    func syncPersistence() { persist() }
 
     private func poll() {
         let pb = NSPasteboard.general
@@ -83,7 +87,17 @@ final class ClipboardHistory {
         return dir.appendingPathComponent("clipboard-history.json")
     }
 
+    /// How long a persisted clip is allowed to live on disk. Older entries are
+    /// dropped on load so stale (possibly sensitive) copies don't linger forever.
+    private let maxPersistedAge: TimeInterval = 14 * 24 * 60 * 60   // 14 days
+
     private func persist() {
+        // Respect the privacy opt-out: keep history in memory only, and remove any
+        // file that a previous (persisting) session left behind.
+        guard Settings.shared.clipboardPersistToDisk else {
+            try? FileManager.default.removeItem(at: storeURL)
+            return
+        }
         let texts: [PersistedText] = entries.compactMap {
             if case .text(let s) = $0.kind { return PersistedText(text: s, date: $0.date) }
             return nil
@@ -92,10 +106,13 @@ final class ClipboardHistory {
     }
 
     private func loadPersisted() {
+        guard Settings.shared.clipboardPersistToDisk else { return }
         guard entries.isEmpty,
               let data = try? Data(contentsOf: storeURL),
               let texts = try? JSONDecoder().decode([PersistedText].self, from: data) else { return }
-        entries = texts.map { ClipEntry(kind: .text($0.text), date: $0.date) }
+        // Drop anything past the age cap.
+        let cutoff = Date().addingTimeInterval(-maxPersistedAge)
+        entries = texts.filter { $0.date >= cutoff }.map { ClipEntry(kind: .text($0.text), date: $0.date) }
     }
 }
 
