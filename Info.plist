@@ -2,52 +2,45 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>WindowSnap</string>
-    <key>CFBundleDisplayName</key>
-    <string>WindowSnap</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.local.windowsnap</string>
-    <key>CFBundleVersion</key>
-    <string>2.3</string>
-    <key>CFBundleShortVersionString</key>
-    <string>2.3</string>
-    <key>CFBundleExecutable</key>
-    <string>WindowSnap</string>
-    <key>CFBundleIconFile</key>
-    <string>Icon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>WindowSnap transcribes captured audio to provide live meeting translation.</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>WindowSnap uses the microphone to transcribe and translate nearby speech, and for Dictate Anywhere.</string>
-    <key>NSCalendarsUsageDescription</key>
-    <string>WindowSnap reads your calendar to show your next meeting and a Join link in the menu bar.</string>
-    <key>NSCalendarsFullAccessUsageDescription</key>
-    <string>WindowSnap reads your calendar to show your next meeting and a Join link in the menu bar.</string>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>WindowSnap opens the Calendar app to the day of an event you create from the World Time converter.</string>
-
-    <!-- Sparkle auto-update. Replace the two placeholders below to enable it:
-         1. SUFeedURL      → your appcast URL. With GitHub Releases you can upload
-            an "appcast.xml" asset and use the always-latest URL shown here (swap
-            YOUR_GITHUB for your user/org). 2. SUPublicEDKey → the EdDSA public
-            key printed by Sparkle's `generate_keys`. Until both are real, the app
-            simply doesn't offer updates. -->
-    <key>SUFeedURL</key>
-    <string>https://github.com/domelor-commits/WindowSnap/releases/latest/download/appcast.xml</string>
-    <key>SUPublicEDKey</key>
-    <string>rHUAHnzL3P3OXV68hrz7uBhB5N5+GJ+XLHzqz4xjlFA=</string>
-    <key>SUEnableAutomaticChecks</key>
-    <true/>
-    <key>SUScheduledCheckInterval</key>
-    <integer>86400</integer>
+	<key>CFBundleDisplayName</key>
+	<string>WindowSnap</string>
+	<key>CFBundleExecutable</key>
+	<string>WindowSnap</string>
+	<key>CFBundleIconFile</key>
+	<string>Icon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.local.windowsnap</string>
+	<key>CFBundleName</key>
+	<string>WindowSnap</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.4</string>
+	<key>CFBundleVersion</key>
+	<string>2.4</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>WindowSnap opens the Calendar app to the day of an event you create from the World Time converter.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>WindowSnap reads your calendar to show your next meeting and a Join link in the menu bar.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>WindowSnap reads your calendar to show your next meeting and a Join link in the menu bar.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>WindowSnap uses the microphone to transcribe and translate nearby speech, and for Dictate Anywhere.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>WindowSnap transcribes captured audio to provide live meeting translation.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/domelor-commits/WindowSnap/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>rHUAHnzL3P3OXV68hrz7uBhB5N5+GJ+XLHzqz4xjlFA=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>
