@@ -756,24 +756,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             i.target = self; m.addItem(i); return i
         }
 
-        // Next meeting (opt-in) at the very top, with a one-click Join.
-        if Settings.shared.meetingBarEnabled, let m = MeetingBar.shared.nextMeeting() {
-            let mins = Int(m.start.timeIntervalSinceNow / 60)
-            let when: String
-            if mins <= 0 { when = "now" }
-            else if mins < 60 { when = "in \(mins) min" }
-            else {
+        // Next meeting(s) (opt-in) at the very top, with a one-click Join. When
+        // several invites overlap the same slot, list them all so you can choose.
+        if Settings.shared.meetingBarEnabled {
+            func whenLabel(_ start: Date) -> String {
+                let mins = Int(start.timeIntervalSinceNow / 60)
+                if mins <= 0 { return "now" }
+                if mins < 60 { return "in \(mins) min" }
                 let f = DateFormatter(); f.timeStyle = .short
-                when = "at \(f.string(from: m.start))"
+                return "at \(f.string(from: start))"
             }
-            let mi = NSMenuItem(title: "📅  \(m.title) — \(when)", action: nil, keyEquivalent: "")
-            mi.isEnabled = false
-            menu.addItem(mi)
-            if let url = m.joinURL {
-                let join = add("      Join Meeting", #selector(joinMeeting(_:)), to: menu)
-                join.representedObject = url.absoluteString
+            let meetings = MeetingBar.shared.overlappingMeetings()
+            if meetings.count == 1, let m = meetings.first {
+                let mi = NSMenuItem(title: "📅  \(m.title) — \(whenLabel(m.start))",
+                                    action: nil, keyEquivalent: "")
+                mi.isEnabled = false
+                menu.addItem(mi)
+                if let url = m.joinURL {
+                    let join = add("      Join Meeting", #selector(joinMeeting(_:)), to: menu)
+                    join.representedObject = url.absoluteString
+                }
+                menu.addItem(.separator())
+            } else if meetings.count > 1 {
+                // Header, then one clickable "Join" row per overlapping meeting.
+                let header = NSMenuItem(title: "📅  Overlapping meetings — choose one to join",
+                                        action: nil, keyEquivalent: "")
+                header.isEnabled = false
+                menu.addItem(header)
+                for m in meetings {
+                    let title = "      \(m.title) — \(whenLabel(m.start))"
+                    if let url = m.joinURL {
+                        let item = add(title, #selector(joinMeeting(_:)), to: menu)
+                        item.representedObject = url.absoluteString
+                    } else {
+                        // No recognizable video link — show it but grey it out.
+                        let item = NSMenuItem(title: "\(title)  (no link)", action: nil, keyEquivalent: "")
+                        item.isEnabled = false
+                        menu.addItem(item)
+                    }
+                }
+                menu.addItem(.separator())
             }
-            menu.addItem(.separator())
         }
 
         _ = add("Open WindowSnap…", #selector(openSettings), to: menu, key: ",")

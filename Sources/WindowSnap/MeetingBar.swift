@@ -32,22 +32,30 @@ final class MeetingBar {
         }
     }
 
-    /// The next timed event that hasn't ended, within the next 12 hours.
-    func nextMeeting() -> Meeting? {
-        guard Settings.shared.meetingBarEnabled, authorized else { return nil }
+    /// The soonest timed event that hasn't ended, plus every other event that
+    /// overlaps its time window — so the menu can offer a choice when invites
+    /// collide. Looks 12 hours ahead; sorted by start time. Empty if none.
+    func overlappingMeetings() -> [Meeting] {
+        guard Settings.shared.meetingBarEnabled, authorized else { return [] }
         let now = Date()
         let cals = store.calendars(for: .event)
-        guard !cals.isEmpty else { return nil }
+        guard !cals.isEmpty else { return [] }
         let pred = store.predicateForEvents(withStart: now.addingTimeInterval(-300),
                                             end: now.addingTimeInterval(12 * 3600),
                                             calendars: cals)
-        let next = store.events(matching: pred)
+        let events = store.events(matching: pred)
             .filter { !$0.isAllDay && $0.endDate > now && $0.status != .canceled }
             .sorted { $0.startDate < $1.startDate }
-            .first
-        guard let ev = next else { return nil }
-        return Meeting(title: ev.title ?? "Untitled", start: ev.startDate, joinURL: Self.joinURL(for: ev))
+        guard let first = events.first else { return [] }
+        // Keep the soonest meeting and anything overlapping its window
+        // (half-open interval so back-to-back meetings don't count as overlapping).
+        return events
+            .filter { $0.startDate < first.endDate && $0.endDate > first.startDate }
+            .map { Meeting(title: $0.title ?? "Untitled", start: $0.startDate, joinURL: Self.joinURL(for: $0)) }
     }
+
+    /// Convenience for callers that only want the single soonest meeting.
+    func nextMeeting() -> Meeting? { overlappingMeetings().first }
 
     /// Extract a known video-conferencing link from the event's url/location/notes.
     static func joinURL(for ev: EKEvent) -> URL? {
