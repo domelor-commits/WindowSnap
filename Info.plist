@@ -39,7 +39,7 @@
 	<key>SUFeedURL</key>
 	<string>https://github.com/domelor-commits/WindowSnap/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>rHUAHnzL3P3OXV68hrz7uBhB5N5+GJ+XLHzqz4xjlFA=</string>
+	<string>wW9yie6nZvEmnUnZeUsQSQt2W7jGQV/+z+acIfMz/6o=</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 </dict>
