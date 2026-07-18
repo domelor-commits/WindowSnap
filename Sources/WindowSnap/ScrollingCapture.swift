@@ -24,8 +24,7 @@ final class RegionSelector {
         // Grab this display (before showing the overlay) so the magnifier can
         // sample live pixels without capturing the overlay itself.
         let dispCG = CGRect(x: f.minX, y: primaryTop - f.maxY, width: f.width, height: f.height)
-        let displayImage = CGWindowListCreateImage(dispCG, [.optionOnScreenOnly], kCGNullWindowID, [.bestResolution])
-            .map { NSImage(cgImage: $0, size: f.size) }
+        let displayImage = ScreenGrab.cgImage(dispCG).map { NSImage(cgImage: $0, size: f.size) }
 
         let panel = KeyablePanel(contentRect: f,
                                  styleMask: [.borderless, .nonactivatingPanel],
@@ -236,6 +235,13 @@ final class RegionSelectionView: NSView {
 
 enum ScreenGrab {
     /// Captures a global-CG-coordinate rect of the screen at full resolution.
+    ///
+    /// Deliberately still `CGWindowListCreateImage` (deprecated macOS 14): the
+    /// scrolling-capture stitch loop compares consecutive grabs synchronously
+    /// while the user scrolls, and ScreenCaptureKit's screenshot API is
+    /// async-only — bridging it in here would add latency/jank to that loop.
+    /// This is the ONE remaining call site; new code should use ScreenCaptureKit
+    /// (see WindowSwitcher.loadThumbnails for the pattern).
     static func cgImage(_ rect: CGRect) -> CGImage? {
         CGWindowListCreateImage(rect, [.optionOnScreenOnly], kCGNullWindowID,
                                 [.bestResolution])

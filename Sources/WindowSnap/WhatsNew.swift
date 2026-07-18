@@ -55,7 +55,7 @@ final class WhatsNewWindowController: NSObject, NSWindowDelegate {
 
     func show() {
         if window == nil { window = buildWindow() }
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         window?.center()
         window?.makeKeyAndOrderFront(nil)
     }

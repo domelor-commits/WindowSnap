@@ -82,7 +82,7 @@ final class ShelfController: NSObject, NSWindowDelegate {
         let vis = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: w, height: h)
         p.setFrameOrigin(NSPoint(x: vis.midX - w / 2, y: vis.maxY - h - 40))
         panel = p
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         p.makeKeyAndOrderFront(nil)
     }
 

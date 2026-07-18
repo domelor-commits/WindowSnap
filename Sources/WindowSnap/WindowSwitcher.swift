@@ -1,5 +1,6 @@
 import Cocoa
 import ApplicationServices
+import ScreenCaptureKit
 
 /// AltTab-style window switcher: a HUD of every open window (thumbnail + app icon
 /// + title). Trigger the shortcut to open it; press it again — or Tab / arrows —
@@ -13,12 +14,15 @@ final class WindowSwitcher {
         let appName: String
         let title: String
         let icon: NSImage?
-        let thumb: NSImage?
+        let windowID: CGWindowID?
         let axWindow: AXUIElement
     }
 
     private var items: [Item] = []
     private var cells: [NSView] = []
+    /// Thumbnail image views awaiting their async ScreenCaptureKit capture,
+    /// keyed by window id. Cleared on close so late captures are dropped.
+    private var thumbViews: [CGWindowID: NSImageView] = [:]
     private var selection = 0
     private var panel: NSPanel?
     private var keyMonitor: Any?
@@ -62,10 +66,11 @@ final class WindowSwitcher {
             p.setFrameOrigin(NSPoint(x: vis.midX - size.width / 2, y: vis.midY - size.height / 2))
         }
         panel = p
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         p.makeKeyAndOrderFront(nil)
         highlight()
         installMonitors()
+        loadThumbnails()
     }
 
     private func buildContent() -> NSView {
@@ -113,7 +118,10 @@ final class WindowSwitcher {
 
         let thumb = NSImageView()
         thumb.imageScaling = .scaleProportionallyUpOrDown
-        thumb.image = item.thumb ?? item.icon
+        // The app icon shows immediately; the live window image replaces it as
+        // soon as its async ScreenCaptureKit capture arrives.
+        thumb.image = item.icon
+        if let wid = item.windowID { thumbViews[wid] = thumb }
         thumb.translatesAutoresizingMaskIntoConstraints = false
 
         let icon = NSImageView()
@@ -211,7 +219,7 @@ final class WindowSwitcher {
         guard isVisible, selection >= 0, selection < items.count else { cancel(); return }
         let item = items[selection]
         close()
-        NSRunningApplication(processIdentifier: item.pid)?.activate(options: [.activateIgnoringOtherApps])
+        NSRunningApplication(processIdentifier: item.pid)?.activate()
         AXUIElementSetAttributeValue(item.axWindow, kAXMainWindowAttribute as CFString, kCFBooleanTrue)
         AXUIElementPerformAction(item.axWindow, kAXRaiseAction as CFString)
         Logger.log("Switcher: → \(item.appName) — \(item.title.prefix(40))")
@@ -222,7 +230,7 @@ final class WindowSwitcher {
     private func close() {
         removeMonitors()
         panel?.orderOut(nil); panel = nil
-        cells = []; items = []
+        cells = []; items = []; thumbViews = [:]
     }
 
     // MARK: Enumerate windows
@@ -239,26 +247,46 @@ final class WindowSwitcher {
             for win in WindowController.windows(of: app.processIdentifier) {
                 guard WindowController.isRealWindow(win, bundleID: app.bundleIdentifier) else { continue }
                 let title = WindowController.getTitle(of: win)
-                let thumb = WindowController.windowNumber(of: win).flatMap { thumbnail(for: CGWindowID($0)) }
+                let wid = WindowController.windowNumber(of: win).map { CGWindowID($0) }
                 result.append(Item(pid: app.processIdentifier,
                                    appName: app.localizedName ?? "App",
                                    title: title,
                                    icon: icon,
-                                   thumb: thumb,
+                                   windowID: wid,
                                    axWindow: win))
             }
         }
         return result
     }
 
-    /// A window's live image, if Screen Recording permission allows it; else nil
-    /// (the cell falls back to the app icon).
-    private static func thumbnail(for windowID: CGWindowID) -> NSImage? {
-        guard windowID != 0 else { return nil }
-        guard let cg = CGWindowListCreateImage(.null, .optionIncludingWindow, windowID,
-                                               [.boundsIgnoreFraming, .nominalResolution]) else { return nil }
-        guard cg.width > 1, cg.height > 1 else { return nil }
-        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    /// Fill in live window images via ScreenCaptureKit (needs the same Screen
+    /// Recording grant as the old CGWindowListCreateImage path). Captures are
+    /// async, so cells show the app icon until each image lands — typically well
+    /// under the time the switcher stays open. Late arrivals after close are
+    /// dropped by the thumbViews identity check.
+    private func loadThumbnails() {
+        let wanted = thumbViews
+        guard !wanted.isEmpty else { return }
+        SCShareableContent.getExcludingDesktopWindows(true, onScreenWindowsOnly: false) { [weak self] content, _ in
+            guard let content else { return }
+            for window in content.windows {
+                guard let view = wanted[window.windowID], window.frame.width > 1 else { continue }
+                // Capture at ~2x the 130pt cell width; SCK scales for us.
+                let cfg = SCStreamConfiguration()
+                let scale = 320 / window.frame.width
+                cfg.width = 320
+                cfg.height = max(1, Int(window.frame.height * scale))
+                cfg.showsCursor = false
+                let filter = SCContentFilter(desktopIndependentWindow: window)
+                SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg) { img, _ in
+                    guard let img else { return }
+                    DispatchQueue.main.async {
+                        guard self?.thumbViews[window.windowID] === view else { return }
+                        view.image = NSImage(cgImage: img, size: NSSize(width: img.width, height: img.height))
+                    }
+                }
+            }
+        }
     }
 }
 

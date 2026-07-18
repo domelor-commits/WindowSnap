@@ -182,7 +182,7 @@ final class QuickAccessOverlay: NSObject {
         fmt.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
         save.nameFieldStringValue = "Screenshot \(fmt.string(from: Date())).png"
         save.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         if save.runModal() == .OK, let url = save.url,
            let tiff = image.tiffRepresentation,
            let rep = NSBitmapImageRep(data: tiff),

@@ -27,7 +27,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
     func show() {
         refresh()
         startTimer()
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
     }
 

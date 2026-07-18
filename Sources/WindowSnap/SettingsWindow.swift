@@ -98,7 +98,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         }
         refreshAccessibilityStatus()
         resizeToFitContent()
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
         syncTabActivity()   // (re)start the Force Quit poll if that tab is showing
     }

@@ -100,7 +100,7 @@ final class ForceQuitPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     func show() {
         if let p = panel {
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
             p.makeKeyAndOrderFront(nil)
             refresh()
             return
@@ -177,7 +177,7 @@ final class ForceQuitPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate
         p.setFrameOrigin(NSPoint(x: vis.midX - w / 2, y: vis.midY - h / 2))
 
         panel = p
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         p.makeKeyAndOrderFront(nil)
     }
 

@@ -82,7 +82,7 @@ final class CommandPalette: NSObject, NSTableViewDataSource, NSTableViewDelegate
         p.setFrameOrigin(NSPoint(x: vis.midX - w / 2, y: vis.maxY - h - 120))
 
         panel = p
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         p.makeKeyAndOrderFront(nil)
         p.makeFirstResponder(searchField)
         if !filtered.isEmpty { table.selectRowIndexes([0], byExtendingSelection: false) }
