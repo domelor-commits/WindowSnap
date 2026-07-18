@@ -64,6 +64,15 @@ final class Settings {
     var currencyFavorites: [String] = []
     var currencyHidden: [String] = []
     var currencyDecimals: Int = 4                // decimal places shown for currency values
+    /// World Clock column zone ids ("" = None). Empty array = never customized;
+    /// `effectiveWorldClockZones` then supplies the defaults. Shared by the
+    /// Convert tab's grid and the menu-bar world-clock glance.
+    var worldClockZones: [String] = []
+    static let defaultWorldClockZones = ["", "Asia/Bangkok", "Asia/Jakarta",
+                                         "Asia/Ho_Chi_Minh", "Asia/Kolkata"]
+    var effectiveWorldClockZones: [String] {
+        worldClockZones.isEmpty ? Settings.defaultWorldClockZones : worldClockZones
+    }
 
     // Configurable shortcuts keyed by SnapRegion.rawValue plus "overwriteLayout"
     var shortcuts: [String: Shortcut] = Settings.defaults()
@@ -187,6 +196,7 @@ final class Settings {
         var currencyFavorites: [String]?
         var currencyHidden: [String]?
         var currencyDecimals: Int?
+        var worldClockZones: [String]?
         var shortcuts: [String: Shortcut]
         var functionKeyApps: [String: String]?
         var overlayShowMagnifier: Bool?
@@ -221,7 +231,8 @@ final class Settings {
                             keystrokeVizEnabled: keystrokeVizEnabled,
                             currencyFavorites: currencyFavorites,
                             currencyHidden: currencyHidden,
-                            currencyDecimals: currencyDecimals, shortcuts: shortcuts,
+                            currencyDecimals: currencyDecimals,
+                            worldClockZones: worldClockZones, shortcuts: shortcuts,
                             functionKeyApps: functionKeyApps,
                             overlayShowMagnifier: overlayShowMagnifier,
                             overlayAutoCloseSeconds: overlayAutoCloseSeconds,
@@ -230,6 +241,24 @@ final class Settings {
         if let data = try? JSONEncoder().encode(snap) {
             UserDefaults.standard.set(data, forKey: defaultsKey)
         }
+    }
+
+    // MARK: Backup (export/import — used by the Settings tab and machine moves)
+
+    /// The current preferences as the same JSON blob `save()` persists.
+    func exportData() -> Data? {
+        save()
+        return UserDefaults.standard.data(forKey: defaultsKey)
+    }
+
+    /// Replace all preferences with a previously exported blob. Returns false —
+    /// changing nothing — if the data isn't a valid settings snapshot.
+    @discardableResult
+    func importData(_ data: Data) -> Bool {
+        guard (try? JSONDecoder().decode(Snapshot.self, from: data)) != nil else { return false }
+        UserDefaults.standard.set(data, forKey: defaultsKey)
+        load()
+        return true
     }
 
     func load() {
@@ -263,6 +292,7 @@ final class Settings {
         currencyFavorites = snap.currencyFavorites ?? []
         currencyHidden = snap.currencyHidden ?? []
         currencyDecimals = snap.currencyDecimals ?? 4
+        worldClockZones = snap.worldClockZones ?? []
         // Merge so new regions added in updates still get defaults
         var merged = Settings.defaults()
         for (k, v) in snap.shortcuts { merged[k] = v }

@@ -237,6 +237,31 @@ extension AppDelegate {
             }
         }
 
+        // World clock glance: current time in the zones picked in the Convert
+        // tab's World Time grid (column 0 is "home" — that's the menu-bar clock
+        // already, so it's skipped). Rebuilt on every open via menuNeedsUpdate,
+        // so the times are always current.
+        let zones = Settings.shared.effectiveWorldClockZones.dropFirst().filter { !$0.isEmpty }
+        if !zones.isEmpty {
+            let fmt = DateFormatter()
+            fmt.dateFormat = "EEE HH:mm"
+            let labels = Dictionary(uniqueKeysWithValues:
+                UnitCatalog.zoneGroups.flatMap { $0.zones }.map { ($0.id, $0.label) })
+            for id in zones {
+                guard let tz = TimeZone(identifier: id) else { continue }
+                fmt.timeZone = tz
+                // "Bangkok, Thailand" → "Bangkok"; fall back to the raw id's city part.
+                let city = labels[id]?.components(separatedBy: ",").first
+                    ?? id.components(separatedBy: "/").last?.replacingOccurrences(of: "_", with: " ")
+                    ?? id
+                let item = NSMenuItem(title: "🕓  \(city)  \(fmt.string(from: Date()))",
+                                      action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
+        }
+
         _ = add("Open WindowSnap…", #selector(openSettings), to: menu, key: ",")
         _ = add("Permissions Setup…", #selector(openPermissions), to: menu)
         menu.addItem(.separator())

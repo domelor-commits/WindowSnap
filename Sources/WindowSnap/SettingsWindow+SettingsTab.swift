@@ -122,7 +122,84 @@ extension SettingsWindowController {
         ovRow.addArrangedSubview(ovStepper)
         doc.addArrangedSubview(ovRow)
 
+        // Backup: move every preference + saved layout to another Mac as one file.
+        doc.addArrangedSubview(sectionHeader("Backup"))
+        let backupRow = NSStackView()
+        backupRow.orientation = .horizontal
+        backupRow.spacing = 10
+        let exportButton = NSButton(title: "Export Settings…",
+                                    target: self, action: #selector(exportSettings))
+        exportButton.bezelStyle = .rounded
+        let importButton = NSButton(title: "Import Settings…",
+                                    target: self, action: #selector(importSettings))
+        importButton.bezelStyle = .rounded
+        let backupHint = NSTextField(labelWithString: "Shortcuts, preferences, and saved layouts in one JSON file.")
+        backupHint.font = .systemFont(ofSize: 11)
+        backupHint.textColor = .secondaryLabelColor
+        backupRow.addArrangedSubview(exportButton)
+        backupRow.addArrangedSubview(importButton)
+        backupRow.addArrangedSubview(backupHint)
+        doc.addArrangedSubview(backupRow)
+
         return wrapInScroll(doc, identifier: "settings", label: "Settings")
+    }
+
+    // MARK: Backup actions
+
+    /// One JSON file containing the preferences snapshot plus layouts.json, so a
+    /// second Mac (or a reinstall) can pick up exactly where this one left off.
+    @objc func exportSettings() {
+        guard let settingsData = Settings.shared.exportData(),
+              let settingsObj = try? JSONSerialization.jsonObject(with: settingsData) else {
+            LayoutManager.notify("Export failed", "Couldn’t read current settings."); return
+        }
+        var envelope: [String: Any] = ["windowSnapExport": 1, "settings": settingsObj]
+        if let layoutData = try? Data(contentsOf: LayoutManager.storeURL),
+           let layoutObj = try? JSONSerialization.jsonObject(with: layoutData) {
+            envelope["layouts"] = layoutObj
+        }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "WindowSnap Settings.json"
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try JSONSerialization.data(withJSONObject: envelope,
+                                                  options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url, options: .atomic)
+            LayoutManager.notify("Settings exported", url.lastPathComponent)
+        } catch {
+            LayoutManager.notify("Export failed", error.localizedDescription)
+        }
+    }
+
+    @objc func importSettings() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let data = try? Data(contentsOf: url),
+              let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              envelope["windowSnapExport"] != nil,
+              let settingsObj = envelope["settings"],
+              let settingsData = try? JSONSerialization.data(withJSONObject: settingsObj),
+              Settings.shared.importData(settingsData) else {
+            LayoutManager.notify("Import failed", "Not a WindowSnap settings export.")
+            return
+        }
+        if let layoutObj = envelope["layouts"],
+           let layoutData = try? JSONSerialization.data(withJSONObject: layoutObj) {
+            try? layoutData.write(to: LayoutManager.storeURL, options: .atomic)
+            NotificationCenter.default.post(name: .windowSnapLayoutsChanged, object: nil)
+        }
+        // Push the imported state everywhere: hotkeys, snapshot timer, login item,
+        // and every tab's controls (installContent clears + rebuilds them).
+        LoginItem.setEnabled(Settings.shared.launchAtLogin)
+        onShortcutsChanged?()
+        onLayoutShortcutsChanged?()
+        onSnapshotIntervalChanged?()
+        if let content = window?.contentView { installContent(into: content, select: 7) }
+        reloadLayouts()
+        LayoutManager.notify("Settings imported", "Preferences and layouts applied.")
     }
 
 }

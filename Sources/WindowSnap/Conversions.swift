@@ -1,452 +1,6 @@
 import Cocoa
 import EventKit
 
-/// Ordered catalog of physical-unit categories for the Conversion tab.
-enum UnitCatalog {
-    struct Entry { let name: String; let unit: Dimension }
-    struct Category { let name: String; let entries: [Entry] }
-
-    private static let day = UnitDuration(symbol: "day", converter: UnitConverterLinear(coefficient: 86_400))
-    private static let week = UnitDuration(symbol: "wk", converter: UnitConverterLinear(coefficient: 604_800))
-
-    static let categories: [Category] = [
-        Category(name: "Length", entries: [
-            .init(name: "Millimeter", unit: UnitLength.millimeters),
-            .init(name: "Centimeter", unit: UnitLength.centimeters),
-            .init(name: "Meter", unit: UnitLength.meters),
-            .init(name: "Kilometer", unit: UnitLength.kilometers),
-            .init(name: "Inch", unit: UnitLength.inches),
-            .init(name: "Foot", unit: UnitLength.feet),
-            .init(name: "Yard", unit: UnitLength.yards),
-            .init(name: "Mile", unit: UnitLength.miles),
-            .init(name: "Nautical mile", unit: UnitLength.nauticalMiles),
-        ]),
-        Category(name: "Mass", entries: [
-            .init(name: "Milligram", unit: UnitMass.milligrams),
-            .init(name: "Gram", unit: UnitMass.grams),
-            .init(name: "Kilogram", unit: UnitMass.kilograms),
-            .init(name: "Tonne", unit: UnitMass.metricTons),
-            .init(name: "Ounce", unit: UnitMass.ounces),
-            .init(name: "Pound", unit: UnitMass.pounds),
-            .init(name: "Stone", unit: UnitMass.stones),
-        ]),
-        Category(name: "Temperature", entries: [
-            .init(name: "Celsius", unit: UnitTemperature.celsius),
-            .init(name: "Fahrenheit", unit: UnitTemperature.fahrenheit),
-            .init(name: "Kelvin", unit: UnitTemperature.kelvin),
-        ]),
-        Category(name: "Volume", entries: [
-            .init(name: "Milliliter", unit: UnitVolume.milliliters),
-            .init(name: "Liter", unit: UnitVolume.liters),
-            .init(name: "Teaspoon", unit: UnitVolume.teaspoons),
-            .init(name: "Tablespoon", unit: UnitVolume.tablespoons),
-            .init(name: "Cup", unit: UnitVolume.cups),
-            .init(name: "Pint", unit: UnitVolume.pints),
-            .init(name: "Quart", unit: UnitVolume.quarts),
-            .init(name: "Gallon", unit: UnitVolume.gallons),
-        ]),
-        Category(name: "Data", entries: [
-            .init(name: "Byte", unit: UnitInformationStorage.bytes),
-            .init(name: "Kilobyte", unit: UnitInformationStorage.kilobytes),
-            .init(name: "Megabyte", unit: UnitInformationStorage.megabytes),
-            .init(name: "Gigabyte", unit: UnitInformationStorage.gigabytes),
-            .init(name: "Terabyte", unit: UnitInformationStorage.terabytes),
-            .init(name: "Mebibyte", unit: UnitInformationStorage.mebibytes),
-            .init(name: "Gibibyte", unit: UnitInformationStorage.gibibytes),
-        ]),
-        Category(name: "Speed", entries: [
-            .init(name: "Meters / second", unit: UnitSpeed.metersPerSecond),
-            .init(name: "Kilometers / hour", unit: UnitSpeed.kilometersPerHour),
-            .init(name: "Miles / hour", unit: UnitSpeed.milesPerHour),
-            .init(name: "Knots", unit: UnitSpeed.knots),
-        ]),
-        Category(name: "Time", entries: [
-            .init(name: "Second", unit: UnitDuration.seconds),
-            .init(name: "Minute", unit: UnitDuration.minutes),
-            .init(name: "Hour", unit: UnitDuration.hours),
-            .init(name: "Day", unit: day),
-            .init(name: "Week", unit: week),
-        ]),
-        Category(name: "Area", entries: [
-            .init(name: "Sq. meter", unit: UnitArea.squareMeters),
-            .init(name: "Sq. kilometer", unit: UnitArea.squareKilometers),
-            .init(name: "Sq. foot", unit: UnitArea.squareFeet),
-            .init(name: "Sq. mile", unit: UnitArea.squareMiles),
-            .init(name: "Hectare", unit: UnitArea.hectares),
-            .init(name: "Acre", unit: UnitArea.acres),
-        ]),
-        Category(name: "Angle", entries: [
-            .init(name: "Degree", unit: UnitAngle.degrees),
-            .init(name: "Radian", unit: UnitAngle.radians),
-            .init(name: "Gradian", unit: UnitAngle.gradians),
-        ]),
-    ]
-
-    /// Time zones grouped by region, in the order shown in the pickers:
-    /// Asia/Pacific, Europe, US/Americas, Middle East, Africa.
-    static let zoneGroups: [(region: String, zones: [(label: String, id: String)])] = [
-        ("Asia / Pacific", [
-            ("Singapore", "Asia/Singapore"),
-            ("Kuala Lumpur, Malaysia", "Asia/Kuala_Lumpur"),
-            ("Bangkok, Thailand", "Asia/Bangkok"),
-            ("Jakarta, Indonesia", "Asia/Jakarta"),
-            ("Manila, Philippines", "Asia/Manila"),
-            ("Ho Chi Minh, Vietnam", "Asia/Ho_Chi_Minh"),
-            ("Hong Kong", "Asia/Hong_Kong"),
-            ("Shanghai, China", "Asia/Shanghai"),
-            ("Taipei, Taiwan", "Asia/Taipei"),
-            ("Tokyo, Japan", "Asia/Tokyo"),
-            ("Seoul, South Korea", "Asia/Seoul"),
-            ("Mumbai, India", "Asia/Kolkata"),
-            ("Sydney, Australia", "Australia/Sydney"),
-            ("Auckland, New Zealand", "Pacific/Auckland"),
-        ]),
-        ("Europe", [
-            ("London, UK", "Europe/London"),
-            ("Paris, France", "Europe/Paris"),
-            ("Berlin, Germany", "Europe/Berlin"),
-            ("Madrid, Spain", "Europe/Madrid"),
-            ("Rome, Italy", "Europe/Rome"),
-            ("Amsterdam, Netherlands", "Europe/Amsterdam"),
-            ("Moscow, Russia", "Europe/Moscow"),
-            ("Istanbul, Türkiye", "Europe/Istanbul"),
-        ]),
-        ("US / Americas", [
-            ("New York, USA", "America/New_York"),
-            ("Chicago, USA", "America/Chicago"),
-            ("Denver, USA", "America/Denver"),
-            ("Los Angeles, USA", "America/Los_Angeles"),
-            ("Honolulu, USA", "Pacific/Honolulu"),
-            ("Toronto, Canada", "America/Toronto"),
-            ("Mexico City, Mexico", "America/Mexico_City"),
-            ("São Paulo, Brazil", "America/Sao_Paulo"),
-        ]),
-        ("Middle East", [
-            ("Dubai, UAE", "Asia/Dubai"),
-            ("Riyadh, Saudi Arabia", "Asia/Riyadh"),
-            ("Tehran, Iran", "Asia/Tehran"),
-            ("Jerusalem, Israel", "Asia/Jerusalem"),
-        ]),
-        ("Africa", [
-            ("Johannesburg, South Africa", "Africa/Johannesburg"),
-            ("Cairo, Egypt", "Africa/Cairo"),
-            ("Lagos, Nigeria", "Africa/Lagos"),
-            ("Nairobi, Kenya", "Africa/Nairobi"),
-        ]),
-    ]
-
-    /// Flat list of all zones (for id → label lookups).
-    static let zones: [(label: String, id: String)] = zoneGroups.flatMap { $0.zones }
-}
-
-// MARK: - World Time (vertical column view, worldtimebuddy-style)
-
-/// A clickable hour row spanning the city columns; selecting it outlines the
-/// aligned instant across all columns.
-final class TimeRowView: NSStackView {
-    let rowIndex: Int
-    var onClick: ((Int) -> Void)?
-    init(rowIndex: Int) {
-        self.rowIndex = rowIndex
-        super.init(frame: .zero)
-        orientation = .horizontal; spacing = 6; alignment = .centerY
-        addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(tapped)))
-    }
-    required init?(coder: NSCoder) { fatalError() }
-    @objc private func tapped() { onClick?(rowIndex) }
-}
-
-/// A flipped container so the rows stack fills the scroll view from the top down.
-final class FlippedClip: NSView { override var isFlipped: Bool { true } }
-
-/// World Time as vertical city columns (like worldtimebuddy's converter): up to
-/// four cities, each headed by a full-width dropdown and a column of 24 hours
-/// running top→bottom. A green outline aligns the same instant across columns;
-/// move it with the vertical slider on the left or by clicking a row. Columns
-/// 3 and 4 are optional ("None").
-final class WorldClockView: NSView {
-    private let cityPopups = [NSPopUpButton(), NSPopUpButton(), NSPopUpButton(), NSPopUpButton(), NSPopUpButton()]
-    private let headerRow = NSStackView()
-    private let rowsStack = NSStackView()
-    private let scroll = NSScrollView()
-    private let summary = NSTextField(labelWithString: "")
-    private let slider = NSSlider()
-    private let selectionBar = NSView()
-    private var barLabels: [NSTextField] = []
-    private var barTop: NSLayoutConstraint!
-
-    private let hourCount = 24
-    private let stepsPerDay = 288                 // 5-minute steps (24 × 12)
-    private let colWidth: CGFloat = 126
-    private let gutter: CGFloat = 30
-    private let rowHeight: CGFloat = 22
-    private let rowSpacing: CGFloat = 3
-    private var rowUnit: CGFloat { rowHeight + rowSpacing }
-    private var referenceDate = Date()            // the day the grid is anchored on
-    private var selectedStep = 0                  // 0…287 (× 5 min from home midnight)
-    private var columnIDs: [String?] = []
-    private var homeMidnight = Date()
-    private var didSetDefaults = false
-
-    override init(frame frameRect: NSRect) { super.init(frame: frameRect); build() }
-    required init?(coder: NSCoder) { fatalError() }
-
-    private func build() {
-        for (i, p) in cityPopups.enumerated() {
-            if i >= 2 { p.addItem(withTitle: "None"); p.lastItem?.representedObject = "" }
-            p.addItem(withTitle: "UTC"); p.lastItem?.representedObject = "UTC"
-            for group in UnitCatalog.zoneGroups {
-                p.menu?.addItem(.separator())
-                let header = NSMenuItem(title: group.region.uppercased(), action: nil, keyEquivalent: "")
-                header.isEnabled = false
-                p.menu?.addItem(header)
-                for z in group.zones { p.addItem(withTitle: z.label); p.lastItem?.representedObject = z.id }
-            }
-            p.target = self; p.action = #selector(citiesChanged)
-            p.translatesAutoresizingMaskIntoConstraints = false
-            p.widthAnchor.constraint(equalToConstant: colWidth).isActive = true
-        }
-
-        // Left slider snaps to 5-minute steps (top = first, bottom = last).
-        slider.minValue = 0; slider.maxValue = Double(stepsPerDay - 1)
-        slider.numberOfTickMarks = hourCount + 1; slider.isVertical = true
-        slider.target = self; slider.action = #selector(sliderMoved)
-        slider.translatesAutoresizingMaskIntoConstraints = false
-
-        headerRow.orientation = .horizontal; headerRow.spacing = 6; headerRow.alignment = .bottom
-        headerRow.translatesAutoresizingMaskIntoConstraints = false
-
-        rowsStack.orientation = .vertical; rowsStack.spacing = rowSpacing; rowsStack.alignment = .leading
-        rowsStack.translatesAutoresizingMaskIntoConstraints = false
-
-        // Floating selection bar (like 24timezones): drawn over the hourly grid,
-        // one time label per column, moved by the slider / drag / click.
-        selectionBar.wantsLayer = true
-        selectionBar.layer?.cornerRadius = 6
-        selectionBar.layer?.borderWidth = 2
-        selectionBar.layer?.borderColor = NSColor.systemGreen.cgColor
-        selectionBar.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor
-        selectionBar.translatesAutoresizingMaskIntoConstraints = false
-        selectionBar.addGestureRecognizer(NSPanGestureRecognizer(target: self, action: #selector(barDragged(_:))))
-
-        let flip = FlippedClip()
-        flip.translatesAutoresizingMaskIntoConstraints = false
-        flip.addSubview(slider); flip.addSubview(rowsStack); flip.addSubview(selectionBar)
-        barTop = selectionBar.topAnchor.constraint(equalTo: rowsStack.topAnchor, constant: 0)
-        NSLayoutConstraint.activate([
-            slider.leadingAnchor.constraint(equalTo: flip.leadingAnchor, constant: 2),
-            slider.widthAnchor.constraint(equalToConstant: 18),
-            slider.topAnchor.constraint(equalTo: rowsStack.topAnchor),
-            slider.bottomAnchor.constraint(equalTo: rowsStack.bottomAnchor),
-            rowsStack.topAnchor.constraint(equalTo: flip.topAnchor),
-            rowsStack.leadingAnchor.constraint(equalTo: slider.trailingAnchor, constant: 6),
-            rowsStack.trailingAnchor.constraint(equalTo: flip.trailingAnchor),
-            rowsStack.bottomAnchor.constraint(equalTo: flip.bottomAnchor),
-            selectionBar.leadingAnchor.constraint(equalTo: rowsStack.leadingAnchor),
-            selectionBar.trailingAnchor.constraint(equalTo: rowsStack.trailingAnchor),
-            selectionBar.heightAnchor.constraint(equalToConstant: rowHeight),
-            barTop,
-        ])
-        scroll.documentView = flip
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-
-        summary.font = .systemFont(ofSize: 12, weight: .medium)
-        summary.lineBreakMode = .byTruncatingTail
-        summary.translatesAutoresizingMaskIntoConstraints = false
-
-        addSubview(headerRow); addSubview(scroll); addSubview(summary)
-        NSLayoutConstraint.activate([
-            headerRow.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            headerRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16 + 26),
-            scroll.topAnchor.constraint(equalTo: headerRow.bottomAnchor, constant: 4),
-            scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            scroll.bottomAnchor.constraint(equalTo: summary.topAnchor, constant: -10),
-            summary.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            summary.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            summary.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
-        ])
-    }
-
-    func reload() {
-        if !didSetDefaults {
-            didSetDefaults = true
-            // Column 0 is "home" (drives the grid anchor), so it tracks the system
-            // zone. The rest are the regions we actually coordinate with day to day.
-            selectDefault(cityPopups[0], preferred: TimeZone.current.identifier, fallback: "Asia/Singapore")
-            selectDefault(cityPopups[1], preferred: "Asia/Bangkok")
-            selectDefault(cityPopups[2], preferred: "Asia/Jakarta")
-            selectDefault(cityPopups[3], preferred: "Asia/Ho_Chi_Minh")
-            selectDefault(cityPopups[4], preferred: "Asia/Kolkata")   // Mumbai
-        }
-        rebuild()
-    }
-
-    /// Anchor the grid on a specific day (from the date picker).
-    func setDate(_ date: Date) { referenceDate = date; rebuild() }
-
-    /// The absolute instant currently selected (for calendar events).
-    var selectedInstant: Date { homeMidnight.addingTimeInterval(TimeInterval(selectedStep * 300)) }
-    var selectionSummary: String { summaryString() }
-
-    private func selectDefault(_ popup: NSPopUpButton, preferred: String, fallback: String? = nil) {
-        for item in popup.itemArray where (item.representedObject as? String) == preferred { popup.select(item); return }
-        if let fb = fallback { for item in popup.itemArray where (item.representedObject as? String) == fb { popup.select(item); return } }
-        popup.selectItem(at: 0)
-    }
-
-    @objc private func citiesChanged() { rebuild() }
-    @objc private func sliderMoved() {
-        selectedStep = (stepsPerDay - 1) - Int(slider.doubleValue.rounded())
-        updateSelection(scrollTo: false)
-    }
-    private func syncSlider() { slider.integerValue = (stepsPerDay - 1) - selectedStep }
-
-    /// Drag the floating bar to any 5-minute position.
-    @objc private func barDragged(_ g: NSPanGestureRecognizer) {
-        let y = g.location(in: rowsStack).y
-        let step = Int((y / rowUnit * 12).rounded())
-        selectedStep = max(0, min(stepsPerDay - 1, step))
-        updateSelection(scrollTo: false)
-    }
-
-    private func rebuild() {
-        columnIDs = cityPopups.map { p -> String? in
-            let id = p.selectedItem?.representedObject as? String
-            return (id?.isEmpty ?? true) ? nil : id
-        }
-        headerRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        rowsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        barLabels.forEach { $0.removeFromSuperview() }
-        barLabels.removeAll()
-
-        guard let homeID = columnIDs.compactMap({ $0 }).first, let homeTZ = TimeZone(identifier: homeID) else {
-            summary.stringValue = ""; return
-        }
-        var homeCal = Calendar(identifier: .gregorian); homeCal.timeZone = homeTZ
-        homeMidnight = homeCal.startOfDay(for: referenceDate)
-        let comps = homeCal.dateComponents([.hour, .minute], from: Date())
-        selectedStep = (comps.hour ?? 0) * 12 + (comps.minute ?? 0) / 5
-
-        // Header dropdowns + offset.
-        for (i, id) in columnIDs.enumerated() {
-            let offset = id.flatMap { TimeZone(identifier: $0) }.map { offsetString($0) } ?? " "
-            let sub = NSTextField(labelWithString: offset)
-            sub.font = .systemFont(ofSize: 10); sub.textColor = .secondaryLabelColor
-            let col = NSStackView(views: [cityPopups[i], sub])
-            col.orientation = .vertical; col.alignment = .leading; col.spacing = 1
-            headerRow.addArrangedSubview(col)
-        }
-
-        // Hourly ladder (background).
-        for r in 0..<hourCount {
-            let row = TimeRowView(rowIndex: r)
-            row.onClick = { [weak self] i in self?.selectedStep = i * 12; self?.updateSelection(scrollTo: false) }
-            for id in columnIDs {
-                if let id = id { row.addArrangedSubview(makeCell(id: id, hour: r)) }
-                else {
-                    let blank = NSView(); blank.translatesAutoresizingMaskIntoConstraints = false
-                    blank.widthAnchor.constraint(equalToConstant: colWidth).isActive = true
-                    blank.heightAnchor.constraint(equalToConstant: rowHeight).isActive = true
-                    row.addArrangedSubview(blank)
-                }
-            }
-            rowsStack.addArrangedSubview(row)
-        }
-
-        // Floating bar labels, one per column (spacing matches the rows).
-        let barStack = NSStackView(); barStack.orientation = .horizontal; barStack.spacing = 6
-        barStack.translatesAutoresizingMaskIntoConstraints = false
-        for _ in columnIDs {
-            let l = NSTextField(labelWithString: ""); l.alignment = .center
-            l.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
-            l.translatesAutoresizingMaskIntoConstraints = false
-            l.widthAnchor.constraint(equalToConstant: colWidth).isActive = true
-            barLabels.append(l); barStack.addArrangedSubview(l)
-        }
-        selectionBar.subviews.forEach { $0.removeFromSuperview() }
-        selectionBar.addSubview(barStack)
-        NSLayoutConstraint.activate([
-            barStack.leadingAnchor.constraint(equalTo: selectionBar.leadingAnchor),
-            barStack.centerYAnchor.constraint(equalTo: selectionBar.centerYAnchor),
-        ])
-        updateSelection(scrollTo: true)
-    }
-
-    private func makeCell(id: String, hour r: Int) -> NSView {
-        let tz = TimeZone(identifier: id) ?? .current
-        let inst = homeMidnight.addingTimeInterval(TimeInterval(r * 3600))
-        var cal = Calendar(identifier: .gregorian); cal.timeZone = tz
-        let h = cal.component(.hour, from: inst)
-        let past = inst.addingTimeInterval(3600) <= Date()
-        let box = NSView(); box.wantsLayer = true; box.layer?.cornerRadius = 5
-        box.layer?.backgroundColor = color(h).cgColor
-        box.alphaValue = past ? 0.4 : 1.0
-        box.translatesAutoresizingMaskIntoConstraints = false
-        box.widthAnchor.constraint(equalToConstant: colWidth).isActive = true
-        box.heightAnchor.constraint(equalToConstant: rowHeight).isActive = true
-
-        let text = NSMutableAttributedString()
-        if h == 0 {
-            let f = DateFormatter(); f.timeZone = tz; f.dateFormat = "EEE"
-            text.append(NSAttributedString(string: f.string(from: inst).uppercased() + "  ",
-                attributes: [.font: NSFont.systemFont(ofSize: 9, weight: .semibold), .foregroundColor: NSColor.secondaryLabelColor]))
-        }
-        text.append(NSAttributedString(string: String(format: "%02d:00", h),
-            attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .medium),
-                         .foregroundColor: past ? NSColor.tertiaryLabelColor : NSColor.labelColor]))
-        let l = NSTextField(labelWithAttributedString: text); l.translatesAutoresizingMaskIntoConstraints = false
-        box.addSubview(l)
-        NSLayoutConstraint.activate([l.centerXAnchor.constraint(equalTo: box.centerXAnchor),
-                                     l.centerYAnchor.constraint(equalTo: box.centerYAnchor)])
-        return box
-    }
-
-    private func color(_ h: Int) -> NSColor {
-        let base = NSColor(calibratedRed: 0.36, green: 0.55, blue: 0.92, alpha: 1)
-        let a: CGFloat
-        switch h { case 0...4, 23: a = 0.55; case 5...7, 20...22: a = 0.34; default: a = 0.14 }
-        return base.withAlphaComponent(a)
-    }
-
-    private func updateSelection(scrollTo: Bool) {
-        // Position the bar at the fractional-hour location of the selected step.
-        barTop.constant = CGFloat(selectedStep) / 12.0 * rowUnit
-        let inst = selectedInstant
-        for (i, id) in columnIDs.compactMap({ $0 }).enumerated() where i < barLabels.count {
-            guard let tz = TimeZone(identifier: id) else { continue }
-            let f = DateFormatter(); f.timeZone = tz; f.dateFormat = "EEE HH:mm"
-            barLabels[i].stringValue = f.string(from: inst)
-        }
-        syncSlider()
-        summary.stringValue = summaryString()
-        if scrollTo {
-            let y = barTop.constant
-            selectionBar.superview?.scrollToVisible(NSRect(x: 0, y: y - 60, width: 1, height: rowHeight + 120))
-        }
-    }
-
-    private func summaryString() -> String {
-        let inst = selectedInstant
-        let parts = columnIDs.compactMap { $0 }.compactMap { id -> String? in
-            guard let tz = TimeZone(identifier: id) else { return nil }
-            var cal = Calendar(identifier: .gregorian); cal.timeZone = tz
-            let h = cal.component(.hour, from: inst); let m = cal.component(.minute, from: inst)
-            let name = id == "UTC" ? "UTC" : (UnitCatalog.zones.first { $0.id == id }?.label.components(separatedBy: ", ").first ?? id)
-            return String(format: "%02d:%02d %@ (%@)", h, m, offsetString(tz), name)
-        }
-        return parts.joined(separator: "   /   ")
-    }
-
-    private func offsetString(_ tz: TimeZone) -> String {
-        if tz.identifier == "UTC" { return "UTC" }
-        let secs = tz.secondsFromGMT(); let h = secs / 3600; let m = abs(secs / 60 % 60)
-        return m == 0 ? String(format: "UTC%+03d", h) : String(format: "UTC%+03d:%02d", h, m)
-    }
-}
-
 // MARK: - Conversion tab
 
 /// The Conversion tab: Currency (live rates + country + pin/hide), World Time
@@ -756,29 +310,61 @@ final class ConversionPane: NSView, NSTableViewDataSource, NSTableViewDelegate,
     @objc private func dateChanged() { updateDateButtonTitle(); worldClock.setDate(datePicker.dateValue) }
 
     /// Create an event at the World Time currently selected in the grid.
-    /// Prefers Microsoft Outlook when it's installed (that's where most people's
-    /// work calendar lives); otherwise falls back to the system Calendar.
+    /// Asks for a title and duration first, then prefers Microsoft Outlook when
+    /// it's installed (that's where most people's work calendar lives);
+    /// otherwise falls back to the system Calendar.
     @objc private func createCalendarEvent() {
         let start = worldClock.selectedInstant
         let notes = worldClock.selectionSummary
+        guard let (title, duration) = promptForEventDetails(start: start) else { return }
         if NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.Outlook") != nil {
-            createOutlookEvent(start: start, notes: notes)
+            createOutlookEvent(title: title, start: start, duration: duration, notes: notes)
         } else {
-            createAppleCalendarEvent(start: start, notes: notes)
+            createAppleCalendarEvent(title: title, start: start, duration: duration, notes: notes)
         }
+    }
+
+    /// Small modal asking for the event's title and length. Returns nil on Cancel.
+    private func promptForEventDetails(start: Date) -> (title: String, duration: TimeInterval)? {
+        let alert = NSAlert()
+        alert.messageText = "New Calendar Event"
+        let fmt = DateFormatter(); fmt.dateStyle = .medium; fmt.timeStyle = .short
+        alert.informativeText = "Starts \(fmt.string(from: start))."
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+
+        let titleField = NSTextField(frame: NSRect(x: 0, y: 34, width: 240, height: 24))
+        titleField.placeholderString = "Event title"
+
+        let durations: [(label: String, secs: TimeInterval)] = [
+            ("15 minutes", 900), ("30 minutes", 1800), ("45 minutes", 2700),
+            ("1 hour", 3600), ("1.5 hours", 5400), ("2 hours", 7200)]
+        let durationPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 26))
+        durations.forEach { durationPopup.addItem(withTitle: $0.label) }
+        durationPopup.selectItem(at: 3)   // 1 hour
+
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 60))
+        box.addSubview(titleField); box.addSubview(durationPopup)
+        alert.accessoryView = box
+        alert.window.initialFirstResponder = titleField
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let title = titleField.stringValue.trimmingCharacters(in: .whitespaces)
+        return (title.isEmpty ? "Event" : title,
+                durations[max(0, durationPopup.indexOfSelectedItem)].secs)
     }
 
     /// Ask Microsoft Outlook (via AppleScript) to create the event in its default
     /// calendar and open it for review. The first call triggers a one-time
     /// Automation permission prompt; if scripting fails or is denied, we fall
     /// back to the system Calendar so an event is always created somewhere.
-    private func createOutlookEvent(start: Date, notes: String) {
-        let end = start.addingTimeInterval(3600)
+    private func createOutlookEvent(title: String, start: Date, duration: TimeInterval, notes: String) {
+        let end = start.addingTimeInterval(duration)
         let src = """
         \(appleScriptDate(from: start, varName: "s"))
         \(appleScriptDate(from: end, varName: "e"))
         tell application "Microsoft Outlook"
-            set newEvent to make new calendar event with properties {subject:"Event", start time:s, end time:e, content:"\(appleScriptEscape(notes))"}
+            set newEvent to make new calendar event with properties {subject:"\(appleScriptEscape(title))", start time:s, end time:e, content:"\(appleScriptEscape(notes))"}
             open newEvent
             activate
         end tell
@@ -787,7 +373,7 @@ final class ConversionPane: NSView, NSTableViewDataSource, NSTableViewDelegate,
         NSAppleScript(source: src)?.executeAndReturnError(&err)
         if err != nil {
             Logger.log("Outlook event failed; falling back to system Calendar")
-            createAppleCalendarEvent(start: start, notes: notes)
+            createAppleCalendarEvent(title: title, start: start, duration: duration, notes: notes)
         } else {
             LayoutManager.notify("Event added to Outlook", notes)
         }
@@ -818,7 +404,7 @@ final class ConversionPane: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     /// Create the event in the system Calendar via EventKit (the fallback path).
-    private func createAppleCalendarEvent(start: Date, notes: String) {
+    private func createAppleCalendarEvent(title: String, start: Date, duration: TimeInterval, notes: String) {
         let make: (Bool) -> Void = { [weak self] granted in
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -828,9 +414,9 @@ final class ConversionPane: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     return
                 }
                 let ev = EKEvent(eventStore: self.eventStore)
-                ev.title = "Event"
+                ev.title = title
                 ev.startDate = start
-                ev.endDate = start.addingTimeInterval(3600)
+                ev.endDate = start.addingTimeInterval(duration)
                 ev.notes = notes
                 ev.calendar = self.eventStore.defaultCalendarForNewEvents
                 do {
