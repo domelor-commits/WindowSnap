@@ -479,8 +479,8 @@ final class ConversionPane: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var rows: [Row] = []
 
     private var categoryIndex: Int { categoryPopup.indexOfSelectedItem }
-    private var isCurrency: Bool { categoryIndex == 0 }
-    private var isWorldTime: Bool { categoryIndex == 1 }
+    private var isWorldTime: Bool { categoryIndex == 0 }
+    private var isCurrency: Bool { categoryIndex == 1 }
 
     private static let commonCurrencies = ["USD", "EUR", "GBP", "JPY", "CNY", "SGD", "AUD", "CAD", "CHF", "HKD", "INR", "THB", "MYR"]
 
@@ -540,8 +540,8 @@ final class ConversionPane: NSView, NSTableViewDataSource, NSTableViewDelegate,
     required init?(coder: NSCoder) { fatalError() }
 
     private func build() {
-        categoryPopup.addItem(withTitle: "Currency")
         categoryPopup.addItem(withTitle: "World Time")
+        categoryPopup.addItem(withTitle: "Currency")
         for c in UnitCatalog.categories { categoryPopup.addItem(withTitle: c.name) }
         categoryPopup.target = self; categoryPopup.action = #selector(categoryChanged)
 
@@ -755,10 +755,70 @@ final class ConversionPane: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     @objc private func dateChanged() { updateDateButtonTitle(); worldClock.setDate(datePicker.dateValue) }
 
-    /// Create a Calendar event at the World Time currently selected in the grid.
+    /// Create an event at the World Time currently selected in the grid.
+    /// Prefers Microsoft Outlook when it's installed (that's where most people's
+    /// work calendar lives); otherwise falls back to the system Calendar.
     @objc private func createCalendarEvent() {
         let start = worldClock.selectedInstant
         let notes = worldClock.selectionSummary
+        if NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.Outlook") != nil {
+            createOutlookEvent(start: start, notes: notes)
+        } else {
+            createAppleCalendarEvent(start: start, notes: notes)
+        }
+    }
+
+    /// Ask Microsoft Outlook (via AppleScript) to create the event in its default
+    /// calendar and open it for review. The first call triggers a one-time
+    /// Automation permission prompt; if scripting fails or is denied, we fall
+    /// back to the system Calendar so an event is always created somewhere.
+    private func createOutlookEvent(start: Date, notes: String) {
+        let end = start.addingTimeInterval(3600)
+        let src = """
+        \(appleScriptDate(from: start, varName: "s"))
+        \(appleScriptDate(from: end, varName: "e"))
+        tell application "Microsoft Outlook"
+            set newEvent to make new calendar event with properties {subject:"Event", start time:s, end time:e, content:"\(appleScriptEscape(notes))"}
+            open newEvent
+            activate
+        end tell
+        """
+        var err: NSDictionary?
+        NSAppleScript(source: src)?.executeAndReturnError(&err)
+        if err != nil {
+            Logger.log("Outlook event failed; falling back to system Calendar")
+            createAppleCalendarEvent(start: start, notes: notes)
+        } else {
+            LayoutManager.notify("Event added to Outlook", notes)
+        }
+    }
+
+    /// Emit AppleScript assigning `varName` a `date` equal to `date` (local time).
+    /// Sets day to 1 first so setting month/day mid-way never overflows.
+    private func appleScriptDate(from date: Date, varName: String) -> String {
+        let c = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        return """
+        set \(varName) to current date
+        set day of \(varName) to 1
+        set year of \(varName) to \(c.year ?? 2025)
+        set month of \(varName) to \(c.month ?? 1)
+        set day of \(varName) to \(c.day ?? 1)
+        set hours of \(varName) to \(c.hour ?? 9)
+        set minutes of \(varName) to \(c.minute ?? 0)
+        set seconds of \(varName) to 0
+        """
+    }
+
+    /// Escape a string for safe embedding inside an AppleScript "..." literal.
+    private func appleScriptEscape(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+         .replacingOccurrences(of: "\"", with: "\\\"")
+         .replacingOccurrences(of: "\n", with: " ")
+         .replacingOccurrences(of: "\r", with: " ")
+    }
+
+    /// Create the event in the system Calendar via EventKit (the fallback path).
+    private func createAppleCalendarEvent(start: Date, notes: String) {
         let make: (Bool) -> Void = { [weak self] granted in
             DispatchQueue.main.async {
                 guard let self = self else { return }

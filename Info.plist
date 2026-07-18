@@ -21,7 +21,7 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>WindowSnap opens the Calendar app to the day of an event you create from the World Time converter.</string>
+	<string>WindowSnap creates calendar events in Microsoft Outlook or the Calendar app, and opens Calendar to the day of an event you create from the World Time converter.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>WindowSnap reads your calendar to show your next meeting and a Join link in the menu bar.</string>
 	<key>NSCalendarsUsageDescription</key>
