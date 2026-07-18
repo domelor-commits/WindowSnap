@@ -34,9 +34,24 @@ persists. Bundle ID is `com.local.windowsnap`.
 
 ## Architecture
 
-- **`main.swift`** (`AppDelegate`, ~1450 lines) — the hub. Sets up the menu bar,
-  registers global hotkeys, wires the settings window and command palette, and
-  runs periodic layout snapshots. Start here to trace app behavior.
+- **`AppDelegate`** — the hub. Split by functional area across one core file plus
+  extension files (the class declaration + stored properties live in `main.swift`,
+  which also holds `applicationDidFinishLaunching` and the app bootstrap):
+  - `main.swift` — class decl, stored properties, launch/reopen lifecycle, bootstrap.
+  - `AppDelegate+SleepWake.swift` — periodic "Saved" snapshot + sleep/wake/lock/unlock
+    layout restore.
+  - `AppDelegate+Snapping.swift` — Accessibility/Screen-Recording prompts, snap logic,
+    edge detection, multi-monitor cycling.
+  - `AppDelegate+Menu.swift` — menu-bar icon, main menu, the dropdown menu, palette
+    actions, Keep Awake countdown.
+  - `AppDelegate+Hotkeys.swift` — global hotkey registration, function-key & system-task
+    actions, force-quit-and-reopen.
+  - `AppDelegate+Capture.swift` — screenshot/scrolling capture delivery + on-screen OCR.
+  - `AppDelegate+Restore.swift` — layout restore-by-id / pinned restore.
+
+  Start in `main.swift` to trace launch, then follow the extension whose name matches
+  the area. Instance stored properties must stay in the `main.swift` class body
+  (Swift extensions can't hold them); `static` stored state may live in an extension.
 - **Window management:** `WindowController` + `SnapRegion` + `LayoutManager`
   (save/restore multi-monitor arrangements to
   `~/Library/Application Support/WindowSnap/layouts.json`), `DragSnap`/`SnapHUD`
@@ -44,7 +59,13 @@ persists. Bundle ID is `com.local.windowsnap`.
 - **Hotkeys:** `HotkeyManager` + `ShortcutRecorder` + `KeyNames`. Every action
   has a configurable shortcut; at least one modifier required.
 - **Settings:** `Settings.swift` (model, persisted to UserDefaults) +
-  `SettingsWindow.swift` (the big ~1780-line tabbed UI).
+  `SettingsWindowController`, the tabbed UI, split like `AppDelegate`:
+  `SettingsWindow.swift` (class decl, stored properties, window/tab plumbing, the
+  Settings-tab toggle handlers) plus `SettingsWindow+SettingsTab`, `+ShortcutsTab`,
+  `+ShortcutsSupport` (function keys, app chooser, accessibility, log), `+FeatureTabs`
+  (Annotate/Clipboard/ForceQuit/Conversion/Translation), `+LayoutsTab`, and
+  `+LayoutsTable` (the table data source/delegate + rename/shortcut popover). Same
+  rule: stored properties stay in the `SettingsWindow.swift` class body.
 - **Utilities** (each self-contained, surfaced via menu/palette): `ClipboardHistory`,
   `Dictation` + `LiveTranslator` (WhisperKit), `Annotator`, `ScrollingCapture`,
   `Calculator`, `Conversions`, `CommandPalette`, `WindowSwitcher`, `ForceQuit`,
@@ -59,4 +80,7 @@ persists. Bundle ID is `com.local.windowsnap`.
   closures. Match the existing dense-comment style — comments explain *why*
   (macOS quirks, timing, permission edge cases), not *what*.
 - Features are added as a new `Sources/WindowSnap/<Feature>.swift` file and wired
-  into `main.swift` (menu + palette action) and `SettingsWindow.swift` (a tab).
+  into the menu/palette (an `AppDelegate+*.swift` extension — usually `+Menu`) and a
+  settings tab (a `SettingsWindow+*.swift` extension). Keep each `AppDelegate` /
+  `SettingsWindowController` method in the extension file for its functional area so
+  edits stay scoped to one small file; only stored properties go in the core file.
