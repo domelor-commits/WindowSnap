@@ -1,4 +1,6 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.0
+// (tools 6.0 so `swift test` finds the Swift Testing framework the Command
+// Line Tools ship; swiftLanguageModes keeps every target in Swift 5 mode.)
 import PackageDescription
 
 let package = Package(
@@ -18,6 +20,14 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             path: "Sources/WindowSnap"
+        ),
+        // Run via ./test.sh — a bare Command Line Tools install needs framework
+        // search flags on the CLI (see the script) for Swift Testing to load.
+        .testTarget(
+            name: "WindowSnapTests",
+            dependencies: ["WindowSnap"],
+            path: "Tests/WindowSnapTests"
         )
-    ]
+    ],
+    swiftLanguageModes: [.v5]
 )

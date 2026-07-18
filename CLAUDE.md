@@ -22,6 +22,14 @@ Original code — not derived from any commercial product.
 - **Full package:** `./build.sh` — regenerates the icon, builds release, embeds
   & signs Sparkle.framework, seals the app, and produces `WindowSnap.dmg`.
 - **Plain build:** `swift build` / `swift build -c release`.
+- **Tests:** `./test.sh` (Swift Testing suite in `Tests/WindowSnapTests`). Use the
+  script, not bare `swift test`: on a Command-Line-Tools-only machine the
+  framework flags must be passed on the CLI or SwiftPM's synthesized runner
+  silently runs zero tests (details in the script). Note the flags create a
+  second build configuration, so alternating test.sh and plain builds triggers
+  full rebuilds.
+- **CI:** `.github/workflows/ci.yml` runs `swift build` + `./test.sh` on every
+  push/PR to main.
 - **Release:** `./release.sh` (bumps version, builds, updates `appcast.xml`).
 
 ### Code signing (important)
@@ -67,10 +75,15 @@ persists. Bundle ID is `com.local.windowsnap`.
   `+LayoutsTable` (the table data source/delegate + rename/shortcut popover). Same
   rule: stored properties stay in the `SettingsWindow.swift` class body.
 - **Utilities** (each self-contained, surfaced via menu/palette): `ClipboardHistory`,
-  `Dictation` + `LiveTranslator` (WhisperKit), `Annotator`, `ScrollingCapture`,
-  `Calculator`, `Conversions`, `CommandPalette`, `WindowSwitcher`, `ForceQuit`,
-  `KeepAwake`, `ShelfWindow`, `MeetingBar`, `KeystrokeVisualizer`, `QuickAccessOverlay`,
-  `CheatSheetOverlay`.
+  `Dictation`, `ScrollingCapture`, `Calculator`, `CommandPalette`, `WindowSwitcher`,
+  `ForceQuit`, `KeepAwake`, `ShelfWindow`, `MeetingBar`, `KeystrokeVisualizer`,
+  `QuickAccessOverlay`, `CheatSheetOverlay`. Three utilities span multiple files
+  (split by top-level type, not extensions):
+  - Annotate: `AnnotatorModel` (tools/shapes), `AnnotationCanvas`, `Annotator` (pane).
+  - Convert: `UnitCatalog` (units + time-zone catalog), `WorldClock` (grid views),
+    `Conversions` (the pane: currency/units/World Time + calendar events).
+  - Translation (WhisperKit): `TranslationEngine` (bridge/translator), `LiveTranslator`
+    (audio capture + transcription), `TranslationPane` (tab UI).
 - **Permissions:** `PermissionsWindow` (guided Accessibility/Screen Recording grant).
 - **Updates:** `Updater` (Sparkle) + `WhatsNew` + `appcast.xml` + `release-notes/`.
 
