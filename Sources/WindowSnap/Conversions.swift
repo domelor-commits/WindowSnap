@@ -273,9 +273,13 @@ final class WorldClockView: NSView {
     func reload() {
         if !didSetDefaults {
             didSetDefaults = true
+            // Column 0 is "home" (drives the grid anchor), so it tracks the system
+            // zone. The rest are the regions we actually coordinate with day to day.
             selectDefault(cityPopups[0], preferred: TimeZone.current.identifier, fallback: "Asia/Singapore")
-            selectDefault(cityPopups[1], preferred: "UTC")
-            for i in 2..<cityPopups.count { cityPopups[i].selectItem(at: 0) }   // None
+            selectDefault(cityPopups[1], preferred: "Asia/Bangkok")
+            selectDefault(cityPopups[2], preferred: "Asia/Jakarta")
+            selectDefault(cityPopups[3], preferred: "Asia/Ho_Chi_Minh")
+            selectDefault(cityPopups[4], preferred: "Asia/Kolkata")   // Mumbai
         }
         rebuild()
     }
