@@ -323,3 +323,101 @@ final class ClipboardHistoryPanel: NSObject, NSTableViewDataSource, NSTableViewD
         panel = nil
     }
 }
+
+// MARK: - In-window Clipboard tab
+
+// MARK: - Clipboard history tab
+
+/// In-window clipboard history: a searchable list; double-click or Copy puts an
+/// item back on the clipboard. (Auto-paste lives in the floating picker, since
+/// here the app window itself is frontmost.)
+final class ClipboardHistoryPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+    private let table = NSTableView()
+    private let searchField = NSTextField()
+    private var filtered: [ClipEntry] = []
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        build()
+        NotificationCenter.default.addObserver(self, selector: #selector(reload),
+                                               name: .windowSnapClipboardChanged, object: nil)
+        reload()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func build() {
+        searchField.placeholderString = "Search…"
+        searchField.delegate = self
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("clip"))
+        col.resizingMask = .autoresizingMask
+        table.addTableColumn(col); table.headerView = nil; table.rowHeight = 28
+        table.dataSource = self; table.delegate = self
+        table.target = self; table.doubleAction = #selector(copySelected)
+
+        let scroll = NSScrollView(); scroll.documentView = table
+        scroll.hasVerticalScroller = true; scroll.translatesAutoresizingMaskIntoConstraints = false
+
+        let copyBtn = NSButton(title: "Copy", target: self, action: #selector(copySelected))
+        let clearBtn = NSButton(title: "Clear", target: self, action: #selector(clearAll))
+        for b in [copyBtn, clearBtn] { b.bezelStyle = .rounded; b.translatesAutoresizingMaskIntoConstraints = false }
+        let hint = NSTextField(labelWithString: "Double-click or Copy to put an item back on the clipboard.")
+        hint.font = .systemFont(ofSize: 10); hint.textColor = .tertiaryLabelColor
+        hint.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(searchField); addSubview(scroll); addSubview(copyBtn); addSubview(clearBtn); addSubview(hint)
+        NSLayoutConstraint.activate([
+            searchField.topAnchor.constraint(equalTo: topAnchor, constant: 14),
+            searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            scroll.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            scroll.bottomAnchor.constraint(equalTo: copyBtn.topAnchor, constant: -8),
+            copyBtn.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            copyBtn.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
+            clearBtn.leadingAnchor.constraint(equalTo: copyBtn.trailingAnchor, constant: 8),
+            clearBtn.centerYAnchor.constraint(equalTo: copyBtn.centerYAnchor),
+            hint.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            hint.centerYAnchor.constraint(equalTo: copyBtn.centerYAnchor),
+        ])
+    }
+
+    @objc func reload() { applyFilter(searchField.stringValue) }
+
+    private func applyFilter(_ q: String) {
+        let all = ClipboardHistory.shared.entries
+        let ql = q.lowercased()
+        filtered = q.isEmpty ? all : all.filter {
+            if case .text(let s) = $0.kind { return s.lowercased().contains(ql) }
+            return "image".contains(ql)
+        }
+        table.reloadData()
+    }
+
+    func controlTextDidChange(_ obj: Notification) { applyFilter(searchField.stringValue) }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { filtered.count }
+    func tableView(_ t: NSTableView, viewFor c: NSTableColumn?, row: Int) -> NSView? {
+        let cell = NSTableCellView()
+        let l = NSTextField(labelWithString: ClipboardHistoryPanel.preview(filtered[row]))
+        l.lineBreakMode = .byTruncatingTail; l.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(l)
+        NSLayoutConstraint.activate([
+            l.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            l.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+            l.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
+        return cell
+    }
+
+    @objc private func copySelected() {
+        let r = table.selectedRow; guard r >= 0, r < filtered.count else { return }
+        let pb = NSPasteboard.general; pb.clearContents()
+        switch filtered[r].kind {
+        case .text(let s):  pb.setString(s, forType: .string)
+        case .image(let i): pb.writeObjects([i])
+        }
+    }
+    @objc private func clearAll() { ClipboardHistory.shared.clear() }
+}

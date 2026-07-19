@@ -275,3 +275,143 @@ final class ForceQuitPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate
         panel = nil
     }
 }
+
+// MARK: - In-window Force Quit / activity tab
+
+// MARK: - Force Quit / activity tab
+
+final class ForceQuitPane: NSView, NSTableViewDataSource, NSTableViewDelegate {
+    private let table = NSTableView()
+    private var statuses: [AppStatus] = []
+    private var timer: Timer?
+    private var refreshing = false
+
+    override init(frame frameRect: NSRect) { super.init(frame: frameRect); build() }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func build() {
+        for (id, title, width) in [("app", "Application", CGFloat(240)),
+                                   ("cpu", "CPU", 70), ("mem", "Memory", 80),
+                                   ("status", "Status", 130)] {
+            let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            c.title = title; c.width = width
+            if id == "app" { c.resizingMask = .autoresizingMask }
+            table.addTableColumn(c)
+        }
+        table.rowHeight = 28
+        table.usesAlternatingRowBackgroundColors = true
+        table.dataSource = self; table.delegate = self
+        table.target = self; table.doubleAction = #selector(forceQuitSelected)
+
+        let scroll = NSScrollView(); scroll.documentView = table
+        scroll.hasVerticalScroller = true; scroll.translatesAutoresizingMaskIntoConstraints = false
+
+        let quitBtn = NSButton(title: "Force Quit", target: self, action: #selector(forceQuitSelected))
+        let refreshBtn = NSButton(title: "Refresh", target: self, action: #selector(refreshClicked))
+        for b in [quitBtn, refreshBtn] { b.bezelStyle = .rounded; b.translatesAutoresizingMaskIntoConstraints = false }
+        let hint = NSTextField(labelWithString: "Not-responding apps and CPU hogs are listed first.")
+        hint.font = .systemFont(ofSize: 10); hint.textColor = .tertiaryLabelColor
+        hint.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(scroll); addSubview(quitBtn); addSubview(refreshBtn); addSubview(hint)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: topAnchor, constant: 14),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            scroll.bottomAnchor.constraint(equalTo: quitBtn.topAnchor, constant: -8),
+            quitBtn.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            quitBtn.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
+            refreshBtn.trailingAnchor.constraint(equalTo: quitBtn.leadingAnchor, constant: -8),
+            refreshBtn.centerYAnchor.constraint(equalTo: quitBtn.centerYAnchor),
+            hint.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            hint.centerYAnchor.constraint(equalTo: quitBtn.centerYAnchor),
+        ])
+    }
+
+    func start() {
+        guard timer == nil else { return }
+        refresh()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.refresh() }
+        let t = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in self?.refresh() }
+        RunLoop.main.add(t, forMode: .common); timer = t
+    }
+    func stop() { timer?.invalidate(); timer = nil }
+
+    private func refresh() {
+        guard !refreshing else { return }
+        refreshing = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let snap = ProcessMonitor.shared.snapshot()
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.refreshing = false
+                let selPid = (self.table.selectedRow >= 0 && self.table.selectedRow < self.statuses.count)
+                    ? self.statuses[self.table.selectedRow].pid : nil
+                self.statuses = snap
+                self.table.reloadData()
+                if let pid = selPid, let idx = snap.firstIndex(where: { $0.pid == pid }) {
+                    self.table.selectRowIndexes([idx], byExtendingSelection: false)
+                }
+            }
+        }
+    }
+
+    @objc private func refreshClicked() { refresh() }
+
+    @objc private func forceQuitSelected() {
+        let row = table.selectedRow
+        guard row >= 0, row < statuses.count else { NSSound.beep(); return }
+        let s = statuses[row]
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Force quit “\(s.name)”?"
+        alert.informativeText = "Force quitting is abrupt — any unsaved work in \(s.name) will be lost."
+        alert.addButton(withTitle: "Force Quit"); alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        _ = NSRunningApplication(processIdentifier: s.pid)?.forceTerminate()
+        Logger.log("Force quit \(s.name) (pid \(s.pid))")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.refresh() }
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { statuses.count }
+    func tableView(_ t: NSTableView, viewFor col: NSTableColumn?, row: Int) -> NSView? {
+        let s = statuses[row]
+        let id = col?.identifier.rawValue ?? ""
+        let cell = NSTableCellView()
+        if id == "app" {
+            let iv = NSImageView(); iv.image = s.icon; iv.translatesAutoresizingMaskIntoConstraints = false
+            let tf = NSTextField(labelWithString: s.name)
+            tf.lineBreakMode = .byTruncatingTail
+            tf.textColor = s.responding ? .labelColor : .systemRed
+            tf.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(iv); cell.addSubview(tf)
+            NSLayoutConstraint.activate([
+                iv.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+                iv.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                iv.widthAnchor.constraint(equalToConstant: 18), iv.heightAnchor.constraint(equalToConstant: 18),
+                tf.leadingAnchor.constraint(equalTo: iv.trailingAnchor, constant: 6),
+                tf.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
+                tf.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
+        } else {
+            let tf = NSTextField(labelWithString: "")
+            tf.translatesAutoresizingMaskIntoConstraints = false
+            if id == "cpu" {
+                tf.stringValue = "\(Int(s.cpu.rounded()))%"; tf.alignment = .right
+                tf.textColor = s.cpu >= 80 ? .systemOrange : .secondaryLabelColor
+            } else if id == "mem" {
+                tf.stringValue = ByteCountFormatter.string(fromByteCount: Int64(s.mem), countStyle: .memory)
+                tf.alignment = .right
+                tf.textColor = s.mem >= 2_000_000_000 ? .systemOrange : .secondaryLabelColor
+            } else {
+                tf.stringValue = s.responding ? "Responding" : "Not Responding"
+                tf.textColor = s.responding ? .secondaryLabelColor : .systemRed
+            }
+            cell.addSubview(tf)
+            NSLayoutConstraint.activate([
+                tf.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+                tf.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+                tf.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
+        }
+        return cell
+    }
+}

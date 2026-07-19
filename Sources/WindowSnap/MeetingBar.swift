@@ -61,17 +61,25 @@ final class MeetingBar {
     static func joinURL(for ev: EKEvent) -> URL? {
         let haystack = [ev.url?.absoluteString, ev.location, ev.notes]
             .compactMap { $0 }.joined(separator: "\n")
-        let patterns = [
-            "https://[a-zA-Z0-9.-]*zoom\\.us/[^\\s\"'<>]+",
-            "https://meet\\.google\\.com/[^\\s\"'<>]+",
-            "https://teams\\.microsoft\\.com/[^\\s\"'<>]+",
-            "https://[a-zA-Z0-9.-]*webex\\.com/[^\\s\"'<>]+",
-        ]
-        for p in patterns {
-            if let r = haystack.range(of: p, options: .regularExpression) {
-                return URL(string: String(haystack[r]))
+        return joinURL(inText: haystack, fallback: ev.url)
+    }
+
+    /// Video-conferencing link patterns, in priority order. Exposed for testing.
+    static let joinURLPatterns = [
+        "https://[a-zA-Z0-9.-]*zoom\\.us/[^\\s\"'<>]+",
+        "https://meet\\.google\\.com/[^\\s\"'<>]+",
+        "https://teams\\.microsoft\\.com/[^\\s\"'<>]+",
+        "https://[a-zA-Z0-9.-]*webex\\.com/[^\\s\"'<>]+",
+    ]
+
+    /// Pure core of `joinURL(for:)`: scan `text` for the first known meeting link,
+    /// else return `fallback`. Split out so it can be unit-tested without EventKit.
+    static func joinURL(inText text: String, fallback: URL? = nil) -> URL? {
+        for p in joinURLPatterns {
+            if let r = text.range(of: p, options: .regularExpression) {
+                return URL(string: String(text[r]))
             }
         }
-        return ev.url
+        return fallback
     }
 }

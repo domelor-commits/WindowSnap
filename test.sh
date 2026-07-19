@@ -18,7 +18,12 @@ cd "$(dirname "$0")"
 FW=/Library/Developer/CommandLineTools/Library/Developer/Frameworks
 LIB=/Library/Developer/CommandLineTools/Library/Developer/usr/lib
 
-if [ ! -d /Applications/Xcode.app ] && [ -d "$FW/Testing.framework" ]; then
+# Whether the flags are needed depends on the *active* toolchain, not whether
+# Xcode.app merely exists on disk: a machine can have Xcode installed yet still
+# have `xcode-select` pointed at the Command Line Tools (which don't put Testing
+# on the default search path). Key off the active developer dir instead.
+DEVDIR=$(xcode-select -p 2>/dev/null)
+if [[ "$DEVDIR" == *CommandLineTools* ]] && [ -d "$FW/Testing.framework" ]; then
   exec swift test \
     -Xswiftc -F"$FW" \
     -Xlinker -F"$FW" \

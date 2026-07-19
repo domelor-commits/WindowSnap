@@ -57,7 +57,7 @@ final class Settings {
     // Dictate Anywhere: Whisper language code for dictation ("" = auto-detect).
     var dictationLanguage: String = ""
     // Show the next calendar meeting (with a Join link) in the menu-bar menu.
-    var meetingBarEnabled: Bool = false
+    var meetingBarEnabled: Bool = true
     // Keystroke visualizer overlay (KeyCastr-style) on/off, restored on launch.
     var keystrokeVizEnabled: Bool = false
     // Conversion tab: currencies pinned to the top (in order) and ones hidden.
@@ -287,7 +287,7 @@ final class Settings {
         translationTargetCode = snap.translationTargetCode ?? "en"
         translationAudioSource = snap.translationAudioSource ?? "system"
         dictationLanguage = snap.dictationLanguage ?? ""
-        meetingBarEnabled = snap.meetingBarEnabled ?? false
+        meetingBarEnabled = snap.meetingBarEnabled ?? true
         keystrokeVizEnabled = snap.keystrokeVizEnabled ?? false
         currencyFavorites = snap.currencyFavorites ?? []
         currencyHidden = snap.currencyHidden ?? []

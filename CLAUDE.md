@@ -82,8 +82,12 @@ persists. Bundle ID is `com.local.windowsnap`.
   - Annotate: `AnnotatorModel` (tools/shapes), `AnnotationCanvas`, `Annotator` (pane).
   - Convert: `UnitCatalog` (units + time-zone catalog), `WorldClock` (grid views),
     `Conversions` (the pane: currency/units/World Time + calendar events).
+  - Capture: `RegionSelector` (drag-out overlay), `ScrollingCapture` (screen grab +
+    scrolling-capture session), `CaptureMenu` (All-in-One chooser).
   - Translation (WhisperKit): `TranslationEngine` (bridge/translator), `LiveTranslator`
     (audio capture + transcription), `TranslationPane` (tab UI).
+  The in-window settings-tab views for Clipboard and Force Quit live alongside their
+  logic in `ClipboardHistory.swift` / `ForceQuit.swift` (the old `Panes.swift` is gone).
 - **Permissions:** `PermissionsWindow` (guided Accessibility/Screen Recording grant).
 - **Updates:** `Updater` (Sparkle) + `WhatsNew` + `appcast.xml` + `release-notes/`.
 
