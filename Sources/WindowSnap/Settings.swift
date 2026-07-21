@@ -58,6 +58,11 @@ final class Settings {
     var dictationLanguage: String = ""
     // Show the next calendar meeting (with a Join link) in the menu-bar menu.
     var meetingBarEnabled: Bool = true
+    // Where "＋ Calendar Event" writes, remembered from the last choice in the New
+    // Event dialog: 0 = Apple Calendar (default), 1 = installed Outlook app (via
+    // AppleScript; classic Outlook only), 2 = Outlook on the web (deep link, works
+    // with New Outlook too).
+    var eventTarget: Int = 0
     // Keystroke visualizer overlay (KeyCastr-style) on/off, restored on launch.
     var keystrokeVizEnabled: Bool = false
     // Conversion tab: currencies pinned to the top (in order) and ones hidden.
@@ -192,6 +197,7 @@ final class Settings {
         var translationAudioSource: String?
         var dictationLanguage: String?
         var meetingBarEnabled: Bool?
+        var eventTarget: Int?
         var keystrokeVizEnabled: Bool?
         var currencyFavorites: [String]?
         var currencyHidden: [String]?
@@ -228,6 +234,7 @@ final class Settings {
                             translationAudioSource: translationAudioSource,
                             dictationLanguage: dictationLanguage,
                             meetingBarEnabled: meetingBarEnabled,
+                            eventTarget: eventTarget,
                             keystrokeVizEnabled: keystrokeVizEnabled,
                             currencyFavorites: currencyFavorites,
                             currencyHidden: currencyHidden,
@@ -288,6 +295,7 @@ final class Settings {
         translationAudioSource = snap.translationAudioSource ?? "system"
         dictationLanguage = snap.dictationLanguage ?? ""
         meetingBarEnabled = snap.meetingBarEnabled ?? true
+        eventTarget = snap.eventTarget ?? 0
         keystrokeVizEnabled = snap.keystrokeVizEnabled ?? false
         currencyFavorites = snap.currencyFavorites ?? []
         currencyHidden = snap.currencyHidden ?? []

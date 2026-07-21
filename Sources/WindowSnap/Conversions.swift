@@ -316,16 +316,45 @@ final class ConversionPane: NSView, NSTableViewDataSource, NSTableViewDelegate,
     @objc private func createCalendarEvent() {
         let start = worldClock.selectedInstant
         let notes = worldClock.selectionSummary
-        guard let (title, duration) = promptForEventDetails(start: start) else { return }
-        if NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.Outlook") != nil {
-            createOutlookEvent(title: title, start: start, duration: duration, notes: notes)
-        } else {
-            createAppleCalendarEvent(title: title, start: start, duration: duration, notes: notes)
+        guard let (title, duration, target) = promptForEventDetails(start: start) else { return }
+        switch target {
+        case 1:  createOutlookAppEvent(title: title, start: start, duration: duration, notes: notes)
+        case 2:  createOutlookWebEvent(title: title, start: start, duration: duration, notes: notes)
+        default: createAppleCalendarEvent(title: title, start: start, duration: duration, notes: notes)
         }
     }
 
-    /// Small modal asking for the event's title and length. Returns nil on Cancel.
-    private func promptForEventDetails(start: Date) -> (title: String, duration: TimeInterval)? {
+    /// Is Microsoft Outlook installed? Only then is it offered as a destination.
+    private var outlookInstalled: Bool {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.Outlook") != nil
+    }
+
+    /// Is Outlook running in "New Outlook" mode? New Outlook exposes no AppleScript
+    /// automation, so the app-save path can't reach it — we only offer the "Outlook
+    /// app" destination when classic (scriptable) Outlook is the active mode.
+    ///
+    /// The flag lives in Outlook's *sandbox container* preferences, not the normal
+    /// domain, so `CFPreferencesCopyAppValue("…", "com.microsoft.Outlook")` returns
+    /// nil — read the container plist directly instead.
+    private var outlookIsNewMode: Bool {
+        let path = ("~/Library/Containers/com.microsoft.Outlook/Data/Library/Preferences/com.microsoft.Outlook.plist" as NSString).expandingTildeInPath
+        guard let dict = NSDictionary(contentsOfFile: path) else { return false }
+        return (dict["IsRunningNewOutlook"] as? Bool) ?? false
+    }
+
+    /// True only when the installed Outlook can actually be scripted to save an
+    /// event into the app (classic mode). Under New Outlook, use the web composer.
+    private var outlookAppScriptable: Bool { outlookInstalled && !outlookIsNewMode }
+
+    /// Small modal asking for the event's title, length and destination calendar.
+    /// Destinations: Apple Calendar (always), the installed Outlook app (only when
+    /// classic Outlook is present and scriptable), and Outlook on the web (always,
+    /// since it works even under New Outlook). The last pick is remembered in
+    /// Settings so events never silently land somewhere the user isn't looking.
+    /// The `Int` returned is the destination code (see `Settings.eventTarget`).
+    /// Returns nil on Cancel.
+    private func promptForEventDetails(start: Date)
+        -> (title: String, duration: TimeInterval, target: Int)? {
         let alert = NSAlert()
         alert.messageText = "New Calendar Event"
         let fmt = DateFormatter(); fmt.dateStyle = .medium; fmt.timeStyle = .short
@@ -333,47 +362,104 @@ final class ConversionPane: NSView, NSTableViewDataSource, NSTableViewDelegate,
         alert.addButton(withTitle: "Create")
         alert.addButton(withTitle: "Cancel")
 
-        let titleField = NSTextField(frame: NSRect(x: 0, y: 34, width: 240, height: 24))
+        // (label, destination code). The "Outlook app" option appears only when
+        // classic Outlook is the active mode (New Outlook isn't scriptable); the
+        // web composer is always available.
+        var targets: [(label: String, code: Int)] = [("Add to: Apple Calendar", 0)]
+        if outlookAppScriptable { targets.append(("Add to: Outlook app", 1)) }
+        targets.append(("Add to: Outlook (web)", 2))
+
+        let rowH: CGFloat = 30
+        let boxH: CGFloat = rowH * 3
+        // Rows are laid out top-down; y is measured from the bottom of the box.
+        var y = boxH - 24
+
+        let titleField = NSTextField(frame: NSRect(x: 0, y: y, width: 240, height: 24))
         titleField.placeholderString = "Event title"
+        y -= rowH
 
         let durations: [(label: String, secs: TimeInterval)] = [
             ("15 minutes", 900), ("30 minutes", 1800), ("45 minutes", 2700),
             ("1 hour", 3600), ("1.5 hours", 5400), ("2 hours", 7200)]
-        let durationPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 26))
+        let durationPopup = NSPopUpButton(frame: NSRect(x: 0, y: y, width: 240, height: 26))
         durations.forEach { durationPopup.addItem(withTitle: $0.label) }
         durationPopup.selectItem(at: 3)   // 1 hour
+        y -= rowH
 
-        let box = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 60))
-        box.addSubview(titleField); box.addSubview(durationPopup)
+        let targetPopup = NSPopUpButton(frame: NSRect(x: 0, y: y, width: 240, height: 26))
+        targets.forEach { targetPopup.addItem(withTitle: $0.label) }
+        // Preselect the remembered destination if it's currently available.
+        if let idx = targets.firstIndex(where: { $0.code == Settings.shared.eventTarget }) {
+            targetPopup.selectItem(at: idx)
+        }
+
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: boxH))
+        box.addSubview(titleField); box.addSubview(durationPopup); box.addSubview(targetPopup)
         alert.accessoryView = box
         alert.window.initialFirstResponder = titleField
 
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }
         let title = titleField.stringValue.trimmingCharacters(in: .whitespaces)
+        let target = targets[max(0, targetPopup.indexOfSelectedItem)].code
+        if target != Settings.shared.eventTarget {
+            Settings.shared.eventTarget = target
+            Settings.shared.save()
+        }
         return (title.isEmpty ? "Event" : title,
-                durations[max(0, durationPopup.indexOfSelectedItem)].secs)
+                durations[max(0, durationPopup.indexOfSelectedItem)].secs,
+                target)
     }
 
-    /// Ask Microsoft Outlook (via AppleScript) to create the event in its default
-    /// calendar and open it for review. The first call triggers a one-time
-    /// Automation permission prompt; if scripting fails or is denied, we fall
-    /// back to the system Calendar so an event is always created somewhere.
-    private func createOutlookEvent(title: String, start: Date, duration: TimeInterval, notes: String) {
+    /// Create the event in the **installed Outlook app** via AppleScript, in the
+    /// calendar of the first configured mail account. Explicitly targeting an
+    /// account-backed calendar matters: Outlook's *default* calendar is often the
+    /// local "On My Computer" store, so an untargeted event silently lands
+    /// somewhere that never syncs. Only classic Outlook is scriptable — under New
+    /// Outlook there are no visible accounts, so we surface that and fall back to
+    /// the web composer, which does work with New Outlook.
+    ///
+    /// The first call triggers a one-time Automation permission prompt.
+    private func createOutlookAppEvent(title: String, start: Date, duration: TimeInterval, notes: String) {
         let end = start.addingTimeInterval(duration)
         let src = """
         \(appleScriptDate(from: start, varName: "s"))
         \(appleScriptDate(from: end, varName: "e"))
         tell application "Microsoft Outlook"
-            set newEvent to make new calendar event with properties {subject:"\(appleScriptEscape(title))", start time:s, end time:e, content:"\(appleScriptEscape(notes))"}
+            -- Prefer the main "Calendar" of the first mail account; fall back to any
+            -- of that account's calendars. Never the local "On My Computer" store.
+            set targetCal to missing value
+            set fallbackCal to missing value
+            try
+                set acct to item 1 of exchange accounts
+                repeat with c in calendars
+                    try
+                        if account of c is acct then
+                            set fallbackCal to c
+                            if (name of c) is "Calendar" then set targetCal to c
+                        end if
+                    end try
+                end repeat
+            end try
+            if targetCal is missing value then set targetCal to fallbackCal
+            if targetCal is missing value then return "NO_ACCOUNT_CALENDAR"
+            set newEvent to make new calendar event at targetCal with properties {subject:"\(appleScriptEscape(title))", start time:s, end time:e, content:"\(appleScriptEscape(notes))"}
             open newEvent
             activate
+            return "OK"
         end tell
         """
         var err: NSDictionary?
-        NSAppleScript(source: src)?.executeAndReturnError(&err)
+        let result = NSAppleScript(source: src)?.executeAndReturnError(&err)
         if err != nil {
-            Logger.log("Outlook event failed; falling back to system Calendar")
-            createAppleCalendarEvent(title: title, start: start, duration: duration, notes: notes)
+            Logger.log("Outlook app scripting failed; using Outlook web composer")
+            LayoutManager.notify("Couldn’t reach the Outlook app",
+                "Opening the event in Outlook on the web instead.")
+            createOutlookWebEvent(title: title, start: start, duration: duration, notes: notes)
+        } else if result?.stringValue == "NO_ACCOUNT_CALENDAR" {
+            Logger.log("Outlook app has no account calendar (New Outlook?); using web composer")
+            LayoutManager.notify("No Outlook account calendar in the app",
+                "Opening the event in Outlook on the web instead.")
+            createOutlookWebEvent(title: title, start: start, duration: duration, notes: notes)
         } else {
             LayoutManager.notify("Event added to Outlook", notes)
         }
@@ -401,6 +487,36 @@ final class ConversionPane: NSView, NSTableViewDataSource, NSTableViewDelegate,
          .replacingOccurrences(of: "\"", with: "\\\"")
          .replacingOccurrences(of: "\n", with: " ")
          .replacingOccurrences(of: "\r", with: " ")
+    }
+
+    /// Create the event in Microsoft Outlook via the Outlook-on-the-web deep link
+    /// composer. This is the only path that works with **New Outlook** for Mac,
+    /// which — unlike classic Outlook — exposes no AppleScript automation at all.
+    /// It opens a pre-filled event composer at outlook.office.com for whichever
+    /// account you're signed into on the web; you review and save it there.
+    /// Requires being signed into Outlook on the web.
+    private func createOutlookWebEvent(title: String, start: Date, duration: TimeInterval, notes: String) {
+        let end = start.addingTimeInterval(duration)
+        // Office 365 deep link. Times are ISO-8601 with the local UTC offset so
+        // the composer shows the same wall-clock time the user picked.
+        let iso = ISO8601DateFormatter()
+        iso.timeZone = .current
+        var comps = URLComponents(string: "https://outlook.office.com/calendar/deeplink/compose")
+        comps?.queryItems = [
+            URLQueryItem(name: "path", value: "/calendar/action/compose"),
+            URLQueryItem(name: "rru", value: "addevent"),
+            URLQueryItem(name: "subject", value: title),
+            URLQueryItem(name: "startdt", value: iso.string(from: start)),
+            URLQueryItem(name: "enddt", value: iso.string(from: end)),
+            URLQueryItem(name: "body", value: notes),
+        ]
+        guard let url = comps?.url else {
+            createAppleCalendarEvent(title: title, start: start, duration: duration, notes: notes)
+            return
+        }
+        NSWorkspace.shared.open(url)
+        LayoutManager.notify("Opening Outlook event",
+            "Review and save the event in Outlook on the web.")
     }
 
     /// Create the event in the system Calendar via EventKit (the fallback path).
