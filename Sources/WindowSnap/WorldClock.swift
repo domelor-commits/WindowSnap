@@ -46,9 +46,32 @@ final class WorldClockView: NSView {
     private var columnIDs: [String?] = []
     private var homeMidnight = Date()
     private var didSetDefaults = false
+    private var clockTimer: Timer?
+    private var lastAnchoredHour = -1             // home-zone hour the selection is anchored to
 
-    override init(frame frameRect: NSRect) { super.init(frame: frameRect); build() }
+    override init(frame frameRect: NSRect) { super.init(frame: frameRect); build(); startClockTimer() }
     required init?(coder: NSCoder) { fatalError() }
+    deinit { clockTimer?.invalidate() }
+
+    /// Keep the green selection bar tied to the current hour: poll once a minute
+    /// and, whenever the home-zone hour rolls over, re-anchor the slider to "now".
+    /// (Minute granularity so it also self-corrects after sleep/wake.)
+    private func startClockTimer() {
+        let t = Timer(timeInterval: 60, repeats: true) { [weak self] _ in self?.tickToCurrentHour() }
+        RunLoop.main.add(t, forMode: .common)
+        clockTimer = t
+    }
+
+    private func tickToCurrentHour() {
+        guard let homeID = columnIDs.compactMap({ $0 }).first,
+              let homeTZ = TimeZone(identifier: homeID) else { return }
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = homeTZ
+        let hour = cal.component(.hour, from: Date())
+        guard hour != lastAnchoredHour else { return }   // only on the hour boundary
+        // Full rebuild re-anchors the slider to "now" AND refreshes which hour
+        // rows are greyed out as past. (rebuild() updates lastAnchoredHour.)
+        rebuild()
+    }
 
     private func build() {
         for (i, p) in cityPopups.enumerated() {
@@ -200,6 +223,7 @@ final class WorldClockView: NSView {
         homeMidnight = homeCal.startOfDay(for: referenceDate)
         let comps = homeCal.dateComponents([.hour, .minute], from: Date())
         selectedStep = (comps.hour ?? 0) * 12 + (comps.minute ?? 0) / 5
+        lastAnchoredHour = comps.hour ?? 0        // keep the hourly refresh in sync
 
         // Header dropdowns + offset.
         for (i, id) in columnIDs.enumerated() {

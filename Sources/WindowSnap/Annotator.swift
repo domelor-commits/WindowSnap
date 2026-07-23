@@ -84,10 +84,12 @@ final class AnnotatorPane: NSView {
         // Row 2: undo · redo · copy · save · save-as, left-aligned.
         let undoBtn = iconButton("arrow.uturn.backward", tip: "Undo", action: #selector(undoPressed))
         let redoBtn = iconButton("arrow.uturn.forward", tip: "Redo", action: #selector(redoPressed))
-        let copyBtn = iconButton("doc.on.doc", tip: "Copy to clipboard", action: #selector(copyPressed))
         let saveBtn = iconButton("arrow.down.doc", tip: "Save", action: #selector(savePressed))
         let saveAsBtn = iconButton("square.and.arrow.down", tip: "Save As…", action: #selector(saveAsPressed))
-        let actionRow = NSStackView(views: [undoBtn, redoBtn, copyBtn, saveBtn, saveAsBtn, NSView()])
+        // Copy the edited drawing to the clipboard — sits just right of Save As.
+        let copyBtn = iconButton("doc.on.doc", tip: "Copy the edited drawing (image + annotations) to the clipboard",
+                                 action: #selector(copyPressed))
+        let actionRow = NSStackView(views: [undoBtn, redoBtn, saveBtn, saveAsBtn, copyBtn, NSView()])
         actionRow.orientation = .horizontal; actionRow.spacing = 4
 
         // Row 3: colour · font · size · delete.
